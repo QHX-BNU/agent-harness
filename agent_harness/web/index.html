@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Agent Harness Console</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Agent Harness 首页">
+      <span class="brand-mark">AH</span>
+      <span><strong>Agent Harness</strong><small>Runtime Console</small></span>
+    </a>
+    <div class="topbar-actions">
+      <span class="provider-pill" id="providerPill"><i></i><span>读取模型配置…</span></span>
+      <button class="button ghost" id="configButton" type="button">模型设置</button>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <aside class="history-panel">
+      <div class="panel-heading">
+        <div><span class="eyebrow">Workspace</span><h2>运行记录</h2></div>
+        <button class="icon-button" id="newSessionButton" type="button" title="新建会话" aria-label="新建会话">＋</button>
+      </div>
+      <div class="history-list" id="historyList"><div class="skeleton"></div><div class="skeleton short"></div></div>
+      <div class="history-footer"><span>本地持久化</span><strong>SQLite</strong></div>
+    </aside>
+
+    <main class="chat-panel">
+      <div class="chat-header">
+        <div><span class="eyebrow">Customer support agent</span><h1>售后执行助手</h1></div>
+        <div class="run-state idle" id="runState"><span></span><b>待命</b></div>
+      </div>
+
+      <div class="chat-feed" id="chatFeed">
+        <section class="welcome-card" id="welcomeCard">
+          <span class="welcome-kicker">可审计 · 可恢复 · 有审批</span>
+          <h2>让模型做判断，<br>让系统守住边界。</h2>
+          <p>输入一个售后任务，右侧会同步展示模型决策、策略检查、工具调用和人工审批。</p>
+          <div class="prompt-examples">
+            <button type="button" data-prompt="订单 ORD-1001 物流延误了，请核实并退款">处理延误退款 <span>→</span></button>
+            <button type="button" data-prompt="帮我查看订单 ORD-1002，判断是否需要退款">检查已送达订单 <span>→</span></button>
+            <button type="button" data-prompt="请处理订单 ORD-9999">验证未知订单 <span>→</span></button>
+          </div>
+        </section>
+      </div>
+
+      <section class="approval-card hidden" id="approvalCard" aria-live="polite">
+        <div class="approval-icon">!</div>
+        <div class="approval-copy">
+          <span>需要人工审批</span><strong id="approvalTitle">高风险工具调用</strong><p id="approvalReason"></p>
+        </div>
+        <div class="approval-actions">
+          <button class="button danger" id="denyButton" type="button">拒绝</button>
+          <button class="button primary" id="approveButton" type="button">批准执行</button>
+        </div>
+      </section>
+
+      <form class="composer" id="promptForm">
+        <label for="promptInput">给 Agent 分配任务</label>
+        <textarea id="promptInput" rows="2" placeholder="例如：查询 ORD-1001，如果确实延误则退款…" required></textarea>
+        <div class="composer-footer">
+          <span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 运行</span>
+          <button class="button primary run-button" id="runButton" type="submit"><span>运行 Agent</span><b>↗</b></button>
+        </div>
+      </form>
+    </main>
+
+    <aside class="inspector">
+      <div class="panel-heading inspector-heading">
+        <div><span class="eyebrow">Trace</span><h2>执行时间线</h2></div>
+        <span class="event-count" id="eventCount">0 events</span>
+      </div>
+      <div class="run-meta" id="runMeta"><span>尚未选择运行</span></div>
+      <div class="timeline" id="timeline">
+        <div class="timeline-empty"><span>◎</span><p>Agent 开始运行后，这里会显示每个可审计步骤。</p></div>
+      </div>
+    </aside>
+  </div>
+
+  <dialog class="config-dialog" id="configDialog">
+    <form method="dialog" class="config-card" id="configForm">
+      <div class="config-heading">
+        <div>
+          <span class="eyebrow">Model provider</span><h2>连接模型</h2>
+          <p>密钥仅保存在当前服务进程内，不会写入运行数据库，也不会通过查询接口返回。</p>
+        </div>
+        <button class="icon-button" id="closeConfigButton" type="button" aria-label="关闭">×</button>
+      </div>
+      <label class="field"><span>Provider</span>
+        <select id="providerType"><option value="demo">离线 Demo（无需密钥）</option><option value="openai-compatible">OpenAI-compatible</option></select>
+      </label>
+      <div class="real-model-fields" id="realModelFields">
+        <label class="field"><span>Base URL</span><input id="baseUrl" type="url" value="https://api.openai.com/v1" autocomplete="url"></label>
+        <label class="field"><span>Model</span><input id="modelName" type="text" placeholder="填写账号可用的模型名称" autocomplete="off"></label>
+        <label class="field"><span>API Key</span><input id="modelApiKey" type="password" placeholder="留空则沿用当前已配置密钥" autocomplete="off"></label>
+      </div>
+      <label class="field subtle-field"><span>控制台访问密钥 <small>仅在服务设置 HARNESS_API_KEY 时填写</small></span><input id="serverApiKey" type="password" placeholder="可选" autocomplete="off"></label>
+      <div class="config-actions"><span class="config-status" id="configStatus"></span><button class="button primary" id="saveConfigButton" value="default" type="submit">应用配置</button></div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

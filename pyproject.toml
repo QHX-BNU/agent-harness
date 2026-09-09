@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-harness-interview"
+version = "0.1.0"
+description = "A dependency-free, production-minded agent runtime for interviews and prototypes"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Agent Harness Demo" }]
+
+[project.scripts]
+agent-harness = "agent_harness.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agent_harness*"]
+
+[tool.setuptools.package-data]
+agent_harness = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg"]
