@@ -1,0 +1,298 @@
+# mini-harness
+
+一个**完整可用的 agent harness**：零第三方依赖，Node 18+ 直接跑，自带前端。
+不是 demo —— 状态机、长期记忆、工具生态、子代理、工作流、沙箱、可观测性都是真能跑的。
+
+![空状态](docs/ui-empty-dark.png)
+
+| 对话 · 工具调用 · 审批 | Trace 全屏 · 三种格式导出 |
+|---|---|
+| ![对话](docs/ui-done-dark.png) | ![Trace](docs/ui-trace-modal.png) |
+
+| 设置 · 工具开关 | 沙箱 · 作用区域与自测 |
+|---|---|
+| ![设置](docs/ui-settings.png) | ![沙箱](docs/ui-sandbox.png) |
+
+
+```
+┌──────────── 前端 (public/) ────────────┐
+│ 会话栏 │ 对话流 + 工具/审批/工作流卡片 │ 状态 / Trace 面板 │
+└────────────────────────────────────────┘
+        ↓ SSE 事件流              ↑ REST
+┌──────────── server.js ─────────────────┐
+│ /api/chat /api/sessions /api/memory …  │
+└────────────────────────────────────────┘
+        ↓
+┌──────────── 内核 ──────────────────────┐
+│ loop 控制循环 │ state 状态机 │ policy 策略+审批 │
+│ memory 记忆   │ tools 注册表 │ agents 子代理     │
+│ workflow 引擎 │ sandbox 沙箱 │ store 持久化     │
+└────────────────────────────────────────┘
+        ↓
+┌──── providers 模型接入端口 ─────────────┐
+│ 15 家厂商预设 · openai/anthropic/mock 协议 │
+└────────────────────────────────────────┘
+```
+
+## 分层与文件
+
+| 层 | 文件 | 实现内容 |
+|---|---|---|
+| 控制循环 | `src/loop.js` | 模型→工具→模型往返、步数预算、并发/串行工具执行、审批挂起、中止、trace 落盘 |
+| 状态机 | `src/state.js` | `idle / running / awaiting_approval / aborted / error`、轮次步数、token 与成本聚合 |
+| 模型端口 | `src/providers/` | 15 家预设 + 3 种协议、超时/指数退避重试、错误归一化、`ping()` 自检、`listModels()` |
+| 上下文 | `src/context.js` | 系统提示组装（工具分类 + 记忆 + 清单）、按 turn 裁剪历史、超长结果落盘 |
+| 记忆 | `src/memory.js` | 分层（global/workspace/session）、词元重叠+重要度+时效检索、自动召回、加载统计 |
+| 工具 | `src/tools/` | 7 类 15 个内置工具、注册/启用开关、统一错误归一化、ctx 注入 |
+| 策略 | `src/policy.js` | 按类别判定 allow/ask/deny、危险命令硬拦、异步审批 broker（超时=拒绝） |
+| 子代理 | `src/agents.js` | 独立上下文派生、并发上限、递归深度限制、结论回传 |
+| 工作流 | `src/workflow.js` | JSON 定义、阶段串行/阶段内并行、`{{input}}`/`{{prev}}`/`{{steps.x}}` 模板 |
+| **沙箱** | `src/sandbox.js` | 作用区域（工作区/主目录/自定义/全盘）、只读模式、命令扫描、环境变量清洗、审计、docker/wsl 后端 |
+| 持久化 | `src/store.js` | 会话 JSON + 事件 JSONL + 产物文件，可恢复、可回放 |
+| Trace | `src/trace.js` | 事件摘要、JSONL / JSON 快照 / Markdown 三种导出格式 |
+| 事件 | `src/events.js` | 30+ 事件类型，同时喂 SSE 与终端彩色日志 |
+| 服务 | `server.js` | 20+ REST 端点 + 3 条 SSE 流 |
+| 前端 | `public/` | 三栏布局、流式渲染、思考块、工具卡片、审批按钮、状态与 Trace 面板、设置弹窗 |
+
+---
+
+## 快速开始
+
+```powershell
+cd D:\Agent\DSH\harness
+node server.js          # 打开 http://127.0.0.1:5175
+```
+
+默认离线 mock 模型，点页面上的胶囊按钮就能看到完整链路。接真实模型：
+
+```powershell
+$env:DEEPSEEK_API_KEY="sk-..."     # 或 API_KEY
+$env:PROVIDER="deepseek"
+node scripts/probe.js              # 先自检：key / 端点 / 模型名 / function calling
+node server.js
+```
+
+预设 15 家厂商（DeepSeek / Qwen / Kimi / GLM / OpenAI / Claude / OpenRouter / Groq /
+Mistral / SiliconFlow / Ollama / vLLM / LM Studio / 自定义 / mock），配置优先级：
+**请求级 > 环境变量 > 厂商预设**。详见 `.env.example` 与 `src/providers/presets.js`。
+
+## 状态：可恢复、可中止、可计量
+
+每个会话都有一个状态机，而不是一条裸消息数组：
+
+| 状态 | 含义 |
+|---|---|
+| `idle` | 空闲，可接收输入 |
+| `running` | 模型/工具正在跑 |
+| `awaiting_approval` | 卡在人工审批（前端弹按钮） |
+| `aborted` | 被用户中止 |
+| `error` | 上一轮失败，`lastError` 有原因 |
+
+同时累计：轮次、步数、请求数、in/out tokens、按模型单价估算的成本、待审批数。
+会话落盘到 `.sessions/<id>.json`，事件落到 `.sessions/<id>.events.jsonl`（可回放），
+服务重启后 `GET /api/sessions/:id` 能原样恢复。前端左侧栏点任意会话即可续聊，
+运行中点「停止」会 `POST /api/sessions/:id/abort`。
+
+## 记忆：分层 + 自动召回 + 主动读写
+
+```
+scope: global    所有会话可见（用户偏好、身份事实）
+       workspace 仅本工作区（项目约定）
+       session   仅本会话（当前上下文，不自动注入，避免污染下一轮）
+category: anchor / structure / knowledge / situation / self
+```
+
+- **自动召回**：每轮开始按用户输入检索 top-K（默认 5）注入系统提示，事件流里会看到
+  `memory_recall`，前端显示「🧠 自动召回 N 条记忆」。
+- **主动读写**：模型可用 `memory_add` / `memory_search` / `memory_list` 工具自己决定记什么。
+- **检索算法**：中英混合分词（中文单字+二元组，英文按词）→ 余弦式重叠 0.6 +
+  重要度 0.28 + 时效衰减 0.12。零依赖，够用。
+- **面板**：右侧「记忆」标签可搜索、新增、删除，并显示加载次数与分层统计。
+
+## 工具：7 类 15 个
+
+| 类别 | 工具 | 说明 |
+|---|---|---|
+| fs | `list_dir` `read_file` `write_file` `edit_file` `glob` `grep` | `edit_file` 精确替换且拒绝多义匹配；路径越界一律拒绝 |
+| shell | `run_shell` | 超时终止、危险命令硬拦 |
+| memory | `memory_add` `memory_search` `memory_list` | 模型自主管理长期记忆 |
+| plan | `todo_write` | 任务清单，实时渲染到右侧「任务」面板 |
+| agent | `task` | 委派子代理（独立上下文） |
+| workflow | `run_workflow` `workflow_list` | 跑多阶段流程 |
+| artifact | `read_artifact` | 超长工具结果落盘后分段读回 |
+
+- **工具开关**：右侧「工具」面板可以随时禁用/启用，禁用的工具立刻从模型的工具表里消失。
+- **超长结果**：超过 `TOOL_RESULT_MAX_CHARS`（默认 8000）自动落盘到 `.artifacts/`，
+  上下文里只留头尾 + 文件路径，模型需要时用 `read_artifact` 分段读。
+- **加工具**：写一个 `{name, description, category, readOnly, parameters, run(args, ctx)}`，
+  加进 `src/tools/index.js` 的 `BUILTIN` 即可；`ctx` 里有 session/store/memory/agents/workflows/emit/signal。
+
+## 子代理
+
+`task` 工具把自包含的子任务丢进独立上下文：
+
+- 子代理看不到主对话，必须靠 prompt 自描述；
+- 子代理会话以 `kind:'subagent'` 持久化，挂在父会话下，不出现在主列表；
+- **递归深度上限** `MAX_AGENT_DEPTH`（默认 2），超了直接拒绝；
+- **并发上限** `MAX_CONCURRENT_AGENTS`（默认 3），排队执行；
+- 子代理内部按 `auto` 跑（它无人可问），所以策略层把审批点放在**委派本身**上：
+  `ask` 模式下，`task`/`run_workflow` 需要你点一次允许，之后子代理自主执行。
+
+## 工作流
+
+定义就是一份 JSON（`workflows/*.json`）：
+
+```json
+{
+  "name": "code-review",
+  "description": "多角度审查 + 汇总",
+  "phases": [
+    { "title": "并行审查", "steps": [
+      { "label": "结构", "prompt": "审查 {{input}} 的模块划分…", "maxSteps": 6 },
+      { "label": "风险", "prompt": "检查 {{input}} 的错误处理与注入风险…" }
+    ]},
+    { "title": "汇总", "steps": [
+      { "label": "报告", "prompt": "合并以下结论：\n{{prev}}" }
+    ]}
+  ]
+}
+```
+
+- 阶段之间**串行**，阶段内部**并行**（每个 step 是一个子代理）；
+- 模板变量：`{{input}}`、`{{prev}}`（上一阶段全部结论）、`{{steps.<label>}}`（任意已完成的步骤）；
+- 前端会实时渲染工作流卡片：阶段、每个 step 的运行/完成状态；
+- 内置 `code-review`（结构/风险/测试三路并行 → 汇总）和 `research`（现状/对比/坑 → 结论）。
+- 三种触发方式：对话里让模型调用 `run_workflow`、右侧面板点「运行」、`POST /api/workflows/run`。
+
+## 沙箱：用户可选作用区域
+
+每个会话可以独立设置「agent 能碰哪儿」。设置 → **沙箱**，或点输入框旁边的 `🔒 工作区 · 可写` 徽标直达。
+
+**作用区域（scope）**
+
+| 选项 | 实际根目录 |
+|---|---|
+| 仅工作区（默认） | 当前工作区 |
+| 用户主目录 | `~` |
+| 自定义目录 | 自己填一个或多个根目录（每行一个） |
+| 整个文件系统 | 不做路径限制，风险自负 |
+
+**权限（mode）**：`可写` / `只读`（只读会拒绝所有写文件与写类命令，比如重定向、`rm`、`git push`、`npm install`）。
+
+**执行后端（backend）**
+
+| 后端 | 是否真隔离 | 说明 |
+|---|---|---|
+| `local` 本地策略沙箱 | 否 | 路径作用域 + 命令扫描 + 环境变量清洗，永远可用 |
+| `docker` | **是** | `docker run --rm --network none -v <root>:/work`，需要 docker 守护进程在跑 |
+| `wsl` | 部分 | 命令跑在 WSL 里，但 `/mnt/c` 仍映射到 Windows 磁盘 |
+
+后端可用性由**实际探测**决定（`docker info`、`wsl -e sh -c exit 0`），没装就标「未安装」并禁用，不会假装隔离成功。
+
+### 本地策略沙箱具体拦什么
+
+1. **路径作用域**：所有文件工具的路径先过 `sandbox.resolve()`，越界直接抛错；写操作在只读模式下拒绝。
+2. **命令扫描**：把命令切成 token，逐个解析像路径的部分（含 `~` 展开、引号剥离、`FOO=/x` 赋值形式），
+   任何解析到作用区域外的路径都拒绝；`..` 穿越、`C:\Windows\...`、`~/.ssh` 都会被拦。
+   关掉严格模式（`SANDBOX_STRICT=0`）只影响这一步，危险命令仍然硬拦。
+3. **危险命令硬拦**：`rm -rf /`、`mkfs`、`format`、`shutdown`、`reg add`、`icacls`、`netsh`、`Set-ExecutionPolicy` 等。
+4. **环境变量清洗**：子进程只拿到 `PATH`/`TEMP` 之类的白名单变量，`HOME`/`USERPROFILE` 被指到作用区域，
+   **API key 之类的秘密不再暴露给 shell**（测试里用 `process.env.SANDBOX_TEST_SECRET` 验证过）。
+5. **审计**：每次放行/拒绝都进 trace（`sandbox_denied` 事件）并挂在会话上，
+   `GET /api/sessions/:id/sandbox` 可以查，界面里被拦会直接弹提示。
+
+### 明确的边界
+
+这是**策略沙箱，不是内核沙箱**。Node 无法在不写原生扩展的情况下给子进程降权，所以本地后端挡不住：
+变量展开绕过（`$HOME`、`%TEMP%`）、编码混淆、程序内部自己拼路径（比如 `python -c` 里读任意文件）、
+已经拿到 shell 之后的间接逃逸。**要真隔离就选 docker 后端**，或者把 agent 放进容器/虚拟机里跑。
+
+界面上有个「自测规则」按钮，会拿当前配置跑 8 条固定用例（区域内读、区域外读、越界命令、穿越、
+危险命令、只读写操作…），把放行/拒绝结果直接列出来——改完配置点一下就知道挡不挡得住。
+
+## 界面
+
+三栏布局，所有配置和系统面板都收在左下角的「设置」里，主界面只留对话：
+
+- **左侧**：会话列表（状态点：运行中/待审批/失败），点一下续聊，悬停出现删除；
+  **底部是「⚙ 设置」入口**和工作区路径。
+- **顶栏**：只有一个状态胶囊（`idle / running / awaiting_approval / aborted / error`）、
+  当前模型元信息和 Trace 按钮。
+- **输入区上方**：供应商下拉 + 模型名 + 审批模式，发消息前随手就能切。
+- **设置弹窗（左下角齿轮）**：左侧分区导航，右侧内容——
+  - **模型**：供应商 / 模型 / **API Key**（密码框，可切换明文）/ Base URL，
+    **测试连接**会拿表单里的值真打一次 `/api/probe`，显示模型名、延迟、是否支持
+    function calling、token 用量，并拉取该端点的模型列表。key 只存在这台浏览器的
+    `localStorage`，留空则回落到服务端环境变量。
+  - **交互**：默认审批模式、每轮自动召回记忆条数。
+  - **沙箱**：作用区域（工作区/主目录/自定义/全盘）、权限（可写/只读）、执行后端（本地策略/Docker/WSL）、
+    严格模式开关、**自测规则**按钮，以及当前实际根目录预览。
+  - **任务**：模型用 `todo_write` 维护的清单，实时同步。
+  - **记忆**：搜索 / 新增 / 删除 / 分层统计。
+  - **工具**：按类别分组，随时启停（关掉就立刻从模型的工具表里消失）。
+  - **工作流**：内置工作流列表 + 输入框一键运行。
+- **右侧面板**：只剩 **状态**（会话 id/模型/轮次/步数/tokens/成本/最后错误）和 **Trace**。
+- **Trace**：实时事件流（每轮跑完也能回放）。顶栏 ⧉ 或右侧 Trace 标签打开；
+  按类别过滤（模型/工具/审批/记忆/计划/子代理/工作流/错误）、关键字搜索、
+  点任意行展开原始 JSON、自动滚动；连续的流式增量会合并成一行 `×N`。
+  导出三种格式：**JSONL**（原始事件，喂脚本）、**JSON**（会话+状态+消息+事件的完整快照）、
+  **Markdown**（人读复盘：元信息 + 对话 + 工具轨迹 + 事件表）。
+  界面上点按钮下载，也可以直接 `GET /api/sessions/:id/trace?format=jsonl|json|md`。
+- 深色为主，跟随系统浅色；工作流与子代理在对话流里渲染成实时卡片。
+
+## HTTP 接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/config` `/api/providers` `/api/tools` `/api/workflows` | 系统信息 |
+| POST | `/api/probe` | 真实打一次模型接口（可带 `apiKey`/`baseUrl`/`model`），返回延迟/用量/工具支持/模型列表 |
+| POST | `/api/tools/:name/toggle` | 启用/禁用工具 |
+| GET | `/api/sandbox` | 作用区域预设 / 权限 / 后端可用性 / 当前默认配置 |
+| POST | `/api/sandbox/test` | 拿一组配置跑 8 条固定用例，返回放行/拒绝结果 |
+| GET | `/api/sessions/:id/sandbox` | 该会话生效的沙箱配置 + 拒绝记录 |
+| GET/POST | `/api/sessions` | 列表 / 新建 |
+| GET/DELETE | `/api/sessions/:id` | 详情 / 删除 |
+| POST | `/api/sessions/:id/abort` | 中止当前轮 |
+| GET | `/api/sessions/:id/events` `/artifacts` | trace 事件（带 group/summary）/ 产物列表 |
+| GET | `/api/sessions/:id/trace?format=jsonl\|json\|md` | **导出 trace**（附件下载） |
+| GET | `/api/sessions/:id/export?format=json\|md` | **导出会话**（含消息与状态） |
+| GET/POST/PATCH/DELETE | `/api/memory` `/api/memory/:id` `/api/memory/search` `/api/memory/stats` | 记忆 CRUD 与检索 |
+| POST | `/api/approve` | 审批结果回填 |
+| POST | `/api/chat` | SSE 对话流（可带 `provider`/`model`/`apiKey`/`baseUrl`） |
+| POST | `/api/workflows/run` | SSE 工作流流 |
+
+SSE 事件类型（30+）：`session` `model` `state` `step` `assistant_delta` `reasoning_delta`
+`assistant_message` `tool_call` `tool_result` `approval_request` `approval_result` `todos`
+`memory_recall` `memory` `subagent_start` `subagent_done` `workflow_*` `usage` `retry` `error` `done`。
+
+## 测试：七层，全部真跑
+
+```powershell
+node scripts/port-test.js      # 模型端口：假厂商跑通两条协议 + 重试 + 错误归一化（37 项）
+node scripts/harness-test.js   # 内核：状态/记忆/工具/策略/上下文/子代理/工作流/循环（72 项）
+node scripts/api-test.js       # HTTP：25 个端点（需先起服务）
+node scripts/e2e.js            # 对话链路：工具调用 + 审批 + 结果回灌（需先起服务）
+node scripts/ui-check.js       # 前端：设置弹窗 / 审批按钮 / 五个面板 / 布局体检 / 深色主题
+node scripts/ui-key-test.js    # 界面填 API key 专项：填 key → 测试连接 → 保存 → 真发一轮（需 fake-llm）
+node scripts/trace-test.js     # Trace：事件记录 → 标签页/弹窗查看 → 三种格式导出（29 项）
+node scripts/sandbox-test.js   # 沙箱：作用区域/权限/命令扫描/环境清洗/后端/审计/界面（76 项）
+```
+
+`scripts/cdp.js` 是共享的浏览器驱动（Node 24 自带 WebSocket，零依赖），
+`scripts/fake-llm.js` 是一个假的 OpenAI + Anthropic 兼容服务（跨 chunk 的 tool_calls JSON、
+`reasoning_content`、429 限流、**401 鉴权**、`/v1/models`），没有 API key 也能验证整条链路：
+
+```powershell
+node scripts/fake-llm.js 5199
+$env:PROVIDER="custom"; $env:BASE_URL="http://127.0.0.1:5199/v1"; $env:MODEL="fake-1"; $env:API_KEY="x"; node server.js
+node scripts/ui-key-test.js    # 在界面上填 key 连它，验证「填 key → 生效」这条链路
+```
+
+## 这个骨架**没有**做的事
+
+- **沙箱是策略级的**：本地后端挡不住变量展开绕过和程序内部拼路径，要真隔离请用 docker 后端或把整个 harness 放进容器（详见上面「沙箱」一节的边界说明）。
+- **记忆没有向量检索**：词元重叠在小规模下够用，量大了要换 embedding + 向量库。
+- **工作流没有条件分支/循环**：只有「阶段串行 + 阶段内并行」，没有 if/else 和 while。
+- **没有多租户**：单进程单工作区，会话之间靠 sessionId 隔离。
+- **没有评测集**：只有 5 个冒烟脚本，没有模型/提示词的回归评测。
+- **前端是原生 JS**：够用，但没有组件化，复杂交互会难维护。

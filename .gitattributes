@@ -1,0 +1,5 @@
+# 统一用 LF 存进仓库（Windows 上检出也保持 LF，避免脚本出现 \r）
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary

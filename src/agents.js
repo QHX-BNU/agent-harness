@@ -1,0 +1,121 @@
+// 子代理：把一个自包含任务丢进独立上下文里跑，只把结论带回主对话。
+// 关键约束：深度限制（防止无限递归）、并发限制、子代理默认自动审批（它没有用户可问）。
+import { runTurn } from './loop.js';
+import { Policy } from './policy.js';
+import { STATUS, setStatus } from './state.js';
+
+export function createAgentRunner({ config, store, tools, memory, createProvider, policy }) {
+  let running = 0;
+  const waiters = [];
+
+  const acquire = () =>
+    new Promise((resolve) => {
+      if (running < config.maxConcurrentAgents) {
+        running++;
+        return resolve();
+      }
+      waiters.push(resolve);
+    });
+
+  const release = () => {
+    running--;
+    const next = waiters.shift();
+    if (next) {
+      running++;
+      next();
+    }
+  };
+
+  return {
+    get running() {
+      return running;
+    },
+
+    async run({ description = '子任务', prompt, model, maxSteps = 8, parent, depth = 1, emit, signal, onDelta, sandbox = null }) {
+      if (!prompt || !String(prompt).trim()) throw new Error('子任务 prompt 不能为空');
+      if (depth > config.maxAgentDepth) {
+        throw new Error(`子代理递归深度超过上限 ${config.maxAgentDepth}（子代理不能再无限制地派生下去）`);
+      }
+
+      await acquire();
+      const child = store.create({
+        provider: parent?.provider || config.provider,
+        model: model || parent?.model || config.model,
+        approvalMode: 'auto', // 子代理无人可问，写/执行类工具自动放行（父级的策略已放行委派本身）
+        title: `[子代理] ${description}`,
+        kind: 'subagent',
+        parentId: parent?.id || null,
+      });
+
+      const provider = createProvider({
+        provider: child.provider,
+        model: child.model,
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        timeoutMs: config.modelTimeoutMs,
+        retries: config.modelRetries,
+      });
+
+      emit?.({
+        type: 'subagent_start',
+        agentId: child.id,
+        description,
+        model: child.model,
+        depth,
+      });
+
+      const childEmit = (ev) => {
+        // 子代理的事件不外泄原始内容流，只转发精简后的增量；trace 由 loop 落到子会话
+        if (ev.type === 'assistant_delta' || ev.type === 'reasoning_delta') {
+          onDelta?.({ type: ev.type, text: ev.text });
+        }
+      };
+
+      try {
+        await runTurn({
+          session: child,
+          userText: String(prompt),
+          provider,
+          tools,
+          policy: new Policy('auto', policy.broker),
+          store,
+          emit: childEmit,
+          config: { ...config, maxSteps },
+          signal,
+          depth,
+          memory,
+          sandbox, // 子代理继承父级的作用区域，不能自己放宽
+          agents: null, // 子代理不能再用 task 工具（深度限制已在上层保证，这里再收一道）
+        });
+      } finally {
+        release();
+      }
+
+      const assistant = child.messages.filter((m) => m.role === 'assistant').at(-1);
+      const summary = (assistant?.content || '').trim() || '(子代理没有产出内容)';
+      const toolCalls = child.messages.filter((m) => m.role === 'tool').length;
+
+      setStatus(child, STATUS.IDLE);
+      store.save(child);
+
+      emit?.({
+        type: 'subagent_done',
+        agentId: child.id,
+        description,
+        steps: child.state.steps,
+        toolCalls,
+        usage: child.state.usage,
+        summary: summary.slice(0, 300),
+      });
+
+      return {
+        summary,
+        sessionId: child.id,
+        steps: child.state.steps,
+        toolCalls,
+        usage: child.state.usage,
+        status: child.state.status,
+      };
+    },
+  };
+}

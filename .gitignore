@@ -1,0 +1,13 @@
+# 会话与状态
+.sessions/
+.artifacts/
+.memory/
+
+# 测试产物
+e2e/
+ui-check/
+demo/
+out/
+
+node_modules/
+*.log

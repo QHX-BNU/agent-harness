@@ -1,0 +1,24 @@
+{
+  "name": "mini-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "一个最小但完整的 agent harness 骨架：控制循环 + 模型接入端口 + 工具注册表 + 策略/审批 + 会话持久化 + SSE 前端",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "probe": "node scripts/probe.js",
+    "port-test": "node scripts/port-test.js",
+    "harness-test": "node scripts/harness-test.js",
+    "api-test": "node scripts/api-test.js",
+    "fake-llm": "node scripts/fake-llm.js",
+    "smoke": "node scripts/smoke.js",
+    "e2e": "node scripts/e2e.js",
+    "ui-check": "node scripts/ui-check.js",
+    "ui-key-test": "node scripts/ui-key-test.js",
+    "trace-test": "node scripts/trace-test.js",
+    "sandbox-test": "node scripts/sandbox-test.js"
+  }
+}
