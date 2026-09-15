@@ -43,6 +43,8 @@ export function createAgentRunner({ config, store, tools, memory, createProvider
       onDelta,
       sandbox = null,
       modelConfig = null,
+      // 隐私开关透传：父会话禁用跨群查询时，子代理也不能绕过
+      crossGroup,
     }) {
       if (!prompt || !String(prompt).trim()) throw new Error('子任务 prompt 不能为空');
       if (depth > config.maxAgentDepth) {
@@ -151,7 +153,7 @@ export function createAgentRunner({ config, store, tools, memory, createProvider
           policy: new Policy('auto', policy.broker),
           store,
           emit: childEmit,
-          config: { ...config, maxSteps },
+          config: { ...config, maxSteps, ...(crossGroup === undefined ? {} : { crossGroup }) },
           signal,
           depth,
           memory,

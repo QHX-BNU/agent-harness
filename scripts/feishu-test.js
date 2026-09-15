@@ -293,6 +293,57 @@ section('[3b] 模拟入站消息');
   ok('不存在的会话不会误报', (await channel.simulate({ chatId: 'oc_empty', content: '' })).ok === true); // 空文本走提示分支
 }
 
+// ================= 3c. 谁做了什么（跨群人员视图） =================
+section('[3c] 谁做了什么');
+{
+  // 用户2（小明）在另一个群干活
+  await channel.simulate({ chatId: 'oc_group_b', senderId: 'ou_bob', senderName: '小明', content: '@小助手 帮我把部署脚本改一下' });
+  await channel.simulate({ chatId: 'oc_group_b', senderId: 'ou_bob', senderName: '小明', content: '@小助手 再补一个回滚步骤' });
+
+  const ctx = { session: store.get(channel.state.sessions['oc_group_1:main']), store, memory, workspaceId: 'default', config: testConfig };
+
+  const a = await tools.execute('user_activity', { user: '小明' }, ctx);
+  ok('user_activity 能查到某人在哪个群干活', a.ok && /「小明」/.test(a.content) && /飞书群「/.test(a.content) && /他说过: 帮我把部署脚本改一下/.test(a.content), a.content.split('\n')[0]);
+  ok('能看到他提过什么要求', a.ok && /部署脚本|回滚步骤/.test(a.content), (a.content.match(/他说过: .*/) || [''])[0].slice(0, 60));
+  ok('不会把别人的会话混进来', !/爱丽丝/.test(a.content));
+
+  const byId = await tools.execute('user_activity', { user: 'ou_bob' }, ctx);
+  ok('用 open_id 也能查', byId.ok && /小明/.test(byId.content));
+
+  const none = await tools.execute('user_activity', { user: '查无此人' }, ctx);
+  ok('查不到时给出见过的说话人列表', none.ok && /没有找到/.test(none.content) && /ou_bob|小明/.test(none.content), none.content.replace(/\n/g, ' ').slice(0, 80));
+
+  const list = await tools.execute('session_list', { user: '小明' }, ctx);
+  ok('session_list 支持按人过滤', list.ok && /小明/.test(list.content) && !/爱丽丝/.test(list.content), list.content.split('\n')[1]?.slice(0, 60));
+
+  const read = await tools.execute('session_read', { session: channel.state.sessions['oc_group_b:main'], limit: 10 }, ctx);
+  ok('session_read 标出是谁说的', read.ok && /【小明】/.test(read.content), (read.content.match(/【小明】.*/) || [''])[0].slice(0, 50));
+
+  // 结构化元数据要落盘（不只是正文前缀）
+  const bSess = store.get(channel.state.sessions['oc_group_b:main']);
+  const firstAsk = bSess.messages.find((m) => m.role === 'user');
+  ok('消息上带结构化说话人', firstAsk.sender?.id === 'ou_bob' && firstAsk.sender?.name === '小明', JSON.stringify(firstAsk.sender));
+  ok('结构化元数据含来源群', firstAsk.sender?.chatId === 'oc_group_b' && firstAsk.sender?.chatType === 'group');
+
+  // trace 不能重复落盘（loop 已经写过了，通道别再写一遍）
+  // 重复的老 bug 表现为：相邻两条事件完全一样
+  const evs = store.readEvents(bSess.id, 500);
+  let adjacentDup = 0;
+  for (let i = 1; i < evs.length; i++) {
+    if (JSON.stringify(evs[i]) === JSON.stringify(evs[i - 1])) adjacentDup++;
+  }
+  ok('trace 没有重复事件', adjacentDup === 0 && evs.length > 4, `相邻重复 ${adjacentDup} 对 / 共 ${evs.length} 条`);
+
+  // FEISHU_CROSS_GROUP=0 时，跨群查询工具必须拒绝
+  const blockedCtx = { ...ctx, config: { ...testConfig, crossGroup: false } };
+  const blockedActivity = await tools.execute('user_activity', { user: '小明' }, blockedCtx);
+  ok('关闭跨群后 user_activity 被拒', blockedActivity.ok && /已被关闭/.test(blockedActivity.content), blockedActivity.content.slice(0, 40));
+  const blockedList = await tools.execute('session_list', {}, blockedCtx);
+  ok('关闭跨群后 session_list 被拒', blockedList.ok && /已被关闭/.test(blockedList.content));
+  const blockedRead = await tools.execute('session_read', { session: bSess.id }, blockedCtx);
+  ok('关闭跨群后 session_read 被拒', blockedRead.ok && /已被关闭/.test(blockedRead.content));
+}
+
 // ================= 4. 回复内容与分片 =================
 section('[4] 回复');
 {

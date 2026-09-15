@@ -25,6 +25,8 @@ export async function runTurn({
   sandbox = null,
   modelConfig = null,
   depth = 0,
+  // 说话人元数据（飞书通道会带：谁在哪个群说的）。结构化存下来，才能回答「某人做了什么」
+  userMeta = null,
 }) {
   // trace 由 loop 自己负责持久化：任何入口（HTTP / CLI / 子代理）跑一轮都会留下事件日志
   const emit = (ev) => {
@@ -38,7 +40,11 @@ export async function runTurn({
 
   const state = setStatus(session, STATUS.RUNNING, { steps: 0, lastError: null, abortRequested: false });
   state.turns += 1;
-  store.append(session, { role: 'user', content: userText });
+  store.append(session, {
+    role: 'user',
+    content: userText,
+    ...(userMeta ? { sender: { ...userMeta, at: userMeta.at || Date.now() } } : {}),
+  });
   emit({ type: 'state', status: state.status, sessionId: session.id });
 
   // ---- 记忆自动召回（只在主会话做，避免子代理重复消耗）----

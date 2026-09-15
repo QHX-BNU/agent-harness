@@ -332,6 +332,8 @@ export function createFeishuChannel({
       ...config,
       workspace: ws?.path || config.workspace,
       workspaceName: ws?.name || '',
+      // 跨群可见性开关跟着通道配置走（digest 工具会读它）
+      crossGroup: cfg.crossGroup !== false,
       channelPrompt: [
         '你正在飞书里为团队提供服务：用户在群聊或私聊里 @ 你，你用工具帮他干活，结论会回复到原消息。',
         '- 回答要能直接贴进聊天窗口：先给结论，再给必要细节；不要长篇大论，不要复述工具输出。',
@@ -339,6 +341,8 @@ export function createFeishuChannel({
         '- 群里沉淀下来的、以后还用得上的事实（约定、结论、负责人、进度），用 memory_add 时**显式传 scope="workspace"**，' +
           '这样别的群、别的会话也能召回；只跟当前话题有关的临时信息才用默认的 session。',
         '- 所有群共用同一个工作区，所以别的群里记下的事实你也能查到；引用时说明来源群，别把 A 群的结论按到 B 群头上。',
+        '- 有人问「某某最近做了什么/在忙什么」时，用 user_activity（按姓名或 open_id）查；' +
+          '问「最近大家在聊什么」用 session_list，要细节再用 session_read。回答时点明是谁、在哪个群、什么时候。',
       ].join('\n'),
     };
 
@@ -360,11 +364,18 @@ export function createFeishuChannel({
     }
 
     let answer = '';
-    const emit = (e) => {
-      store.appendEvent(session.id, e);
+    // 注意：runTurn 内部会自己把事件落盘（loop 的 emit 已经做了），这里再 append 一次
+    // 会让 trace 每条事件写两遍。所以给 loop 的是「只处理不落盘」的版本，
+    // 而给沙箱的（不经过 loop）仍然要落盘。
+    const observe = (e) => {
       if (e.type === 'assistant_message') answer = e.content;
       if (e.type === 'error') status.lastError = truncate(e.message, 300);
       onEvent?.(e, session, ev);
+    };
+    const emit = observe;
+    const sandboxEmit = (e) => {
+      store.appendEvent(session.id, e);
+      observe(e);
     };
 
     const slowTimer = setTimeout(
@@ -388,11 +399,21 @@ export function createFeishuChannel({
         memory,
         agents,
         workflows,
+        // 结构化记下「谁在哪个群说的」——跨群查「某人做了什么」全靠它
+        userMeta: {
+          id: ev.sender_id,
+          name: state.users[ev.sender_id] || ev.sender_name || null,
+          chatId: ev.chat_id,
+          chatType: ev.chat_type,
+          chatTitle: (state.chats[ev.chat_id] || {}).name || null,
+          threadKey: ev.thread_id || ev.root_id || 'main',
+          messageId: ev.message_id,
+        },
         sandbox: createSandbox({
           ...(config.sandbox || {}),
           workspace: ws?.path || config.workspace,
           sessionId: session.id,
-          emit,
+          emit: sandboxEmit,
         }),
         modelConfig: {
           provider: provider.id,

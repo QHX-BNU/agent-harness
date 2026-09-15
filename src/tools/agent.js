@@ -30,6 +30,8 @@ export const task = {
       signal: ctx.signal,
       sandbox: ctx.sandbox,
       modelConfig: ctx.modelConfig, // 继承本次请求的 key/端点，否则前端填的 key 会丢
+      // 隐私开关要跟着子代理走：父会话禁用跨群查询时，子代理也不能绕过
+      crossGroup: ctx.config?.crossGroup,
     });
     return result.summary;
   },

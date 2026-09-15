@@ -89,6 +89,8 @@ export const config = {
         .map(([k, v]) => [k.trim(), v.trim()]),
     ),
     approvalMode: env.FEISHU_APPROVAL_MODE || 'auto', // 机器人没人可问，默认自动放行
+    // 0 = 关掉跨群/跨会话查询（user_activity / session_list / session_read），只看得到当前会话
+    crossGroup: env.FEISHU_CROSS_GROUP !== '0',
     progressAfterMs: num(env.FEISHU_PROGRESS_AFTER_MS, 15000),
     chunkSize: num(env.FEISHU_CHUNK_SIZE, 3000),
     maxRestarts: num(env.FEISHU_MAX_RESTARTS, 5),
