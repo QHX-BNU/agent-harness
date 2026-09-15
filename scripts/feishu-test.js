@@ -424,6 +424,7 @@ section('[7] 服务接口');
   const r = await fetch(`${BASE}/api/channels`);
   const data = await r.json().catch(() => null);
   if (r.ok && data?.feishu) {
+    const wasRunning = data.feishu.running === true;
     ok('GET /api/channels 返回飞书通道状态', typeof data.feishu.running === 'boolean', `running=${data.feishu.running} ready=${data.feishu.ready}`);
     ok('状态里带配置信息', data.feishu.requireMention !== undefined && 'approvalMode' in data.feishu);
     const started = await (await fetch(`${BASE}/api/channels/feishu/start`, { method: 'POST' })).json();
@@ -433,6 +434,13 @@ section('[7] 服务接口');
     ok('订阅就绪标记变 true', st.feishu.ready === true);
     const stopped = await (await fetch(`${BASE}/api/channels/feishu/stop`, { method: 'POST' })).json();
     ok('POST stop 能停掉订阅', stopped.running === false);
+    // 测试不能把正在跑的通道留在停止状态
+    if (wasRunning) {
+      await fetch(`${BASE}/api/channels/feishu/start`, { method: 'POST' });
+      await sleep(1500);
+      const back = await (await fetch(`${BASE}/api/channels`)).json();
+      ok('测试结束后恢复原有运行状态', back.feishu.running === true, '（原本就在跑，已重新拉起）');
+    }
   } else {
     console.log('  ⊘ 服务未运行或版本较旧，跳过接口检查');
   }
