@@ -61,6 +61,7 @@
     streaming: null,
     reasoning: null,
     toolCards: new Map(),
+    agentStats: new Map(),
     wfCard: null,
     typing: null,
     providers: [],
@@ -540,13 +541,47 @@
 
       case 'subagent_start': {
         const card = el('div', 'agent-card');
-        card.innerHTML = `<div class="head">⇢ 子代理 · <span class="name"></span></div><div class="body"></div>`;
+        card.innerHTML =
+          `<div class="head">⇢ 子代理 · <span class="name"></span></div>` +
+          `<div class="body"></div>` +
+          `<div class="live dim"></div>`;
         card.querySelector('.name').textContent = ev.description;
         const cred = { request: '本次请求', 'request(baseUrl only)': '本次请求(仅端点)', 'server-env': '服务端环境变量' }[ev.credentialSource] || ev.credentialSource || '本次请求';
         card.querySelector('.body').textContent = `${ev.provider ? `${ev.provider} · ` : ''}${ev.model} · 深度 ${ev.depth} · 凭证 ${cred}`;
+        const btn = el('button', 'mini open-agent', '查看执行过程 →');
+        btn.onclick = () =>
+          window.AgentView?.open(ev.agentId, {
+            description: ev.description,
+            depth: ev.depth,
+            provider: ev.provider,
+            model: ev.model,
+            credentialSource: ev.credentialSource,
+          });
+        card.append(btn);
         els.messages.append(card);
         state.toolCards.set(`agent:${ev.agentId}`, card);
+        state.agentStats.set(ev.agentId, { steps: 0, tools: 0, last: '' });
         scrollDown();
+        break;
+      }
+
+      case 'subagent_event': {
+        // 子代理的内部事件不铺在对话流里（它们嵌在 Trace 中），这里只更新卡片上的实时进度
+        const card = state.toolCards.get(`agent:${ev.agentId}`);
+        if (!card) break;
+        const stat = state.agentStats.get(ev.agentId) || { steps: 0, tools: 0, last: '' };
+        const inner = ev.event || {};
+        if (inner.type === 'step') stat.steps = inner.step;
+        if (inner.type === 'tool_call') {
+          stat.tools += 1;
+          stat.last = `${inner.name}(${JSON.stringify(inner.args ?? {}).slice(0, 40)})`;
+        }
+        if (inner.type === 'assistant_delta' && inner.text) stat.last = inner.text.replace(/\s+/g, ' ').slice(0, 60);
+        state.agentStats.set(ev.agentId, stat);
+        const live = card.querySelector('.live');
+        if (live) {
+          live.textContent = `运行中 · 第 ${stat.steps || 1} 步 · ${stat.tools} 次工具调用${stat.last ? ` · ${stat.last}` : ''}`;
+        }
         break;
       }
 
@@ -555,6 +590,10 @@
         if (card) {
           card.querySelector('.head').textContent = `⇠ 子代理 ${ev.description} 结束`;
           card.querySelector('.body').textContent = `${ev.steps} 步 · ${ev.toolCalls} 次工具调用 · ${(ev.summary || '').slice(0, 200)}`;
+          const live = card.querySelector('.live');
+          if (live) live.textContent = '';
+          const btn = card.querySelector('.open-agent');
+          if (btn) btn.textContent = '查看执行过程 →';
         }
         scrollDown();
         break;
@@ -934,6 +973,7 @@
       pushState();
       els.meta.textContent = `${els.provider.value} · ${els.model.value || '默认模型'}`;
       window.Trace?.init();
+      window.AgentView?.init();
       window.Panels?.init();
     } catch (err) {
       els.meta.textContent = `初始化失败：${err.message}`;

@@ -18,6 +18,8 @@ import { createAgentRunner } from '../src/agents.js';
 import { createProvider, resolveProviderConfig } from '../src/providers/index.js';
 import { createWorkflowEngine } from '../src/workflow.js';
 import { runTurn } from '../src/loop.js';
+import { eventsToJsonl, sessionToBundle, sessionToMarkdown } from '../src/trace.js';
+import { openPage } from './cdp.js';
 
 let pass = 0;
 let fail = 0;
@@ -128,6 +130,26 @@ section('[1] 环境：服务端没有任何 key，凭证只能来自请求');
   ok('子代理被真实启动并结束', types.includes('subagent_start') && types.includes('subagent_done'));
   ok('全程没有报错事件', !types.includes('error'), ev2.filter((e) => e.type === 'error').map((e) => e.message).join(' | ') || '无');
 
+  // ---- 1c-2. 子代理的 trace 必须嵌在父 trace 里 ----
+  const trace = tmpStore.readEvents(parent2.id);
+  const nested = trace.filter((e) => e.type === 'subagent_event');
+  const innerTypes = new Set(nested.map((e) => e.event?.type));
+  ok('父 trace 里嵌入了子代理事件', nested.length >= 3, `${nested.length} 条嵌套事件`);
+  ok('嵌套里含步骤/工具调用/工具结果', ['step', 'tool_call', 'tool_result'].every((t) => innerTypes.has(t)), [...innerTypes].join(','));
+  ok('嵌套事件带 agentId 与描述（可分组）', nested.every((e) => e.agentId && e.description));
+  ok('嵌套的流式文本被合并（不刷屏）', nested.filter((e) => e.event?.type === 'assistant_delta').every((e) => (e.event.merged || 0) >= 1));
+  const childTrace = tmpStore.readEvents(ev2.find((e) => e.type === 'subagent_done').agentId);
+  ok('子代理自己的 trace 依然完整', childTrace.filter((e) => e.type === 'assistant_delta').length > 0, `${childTrace.length} 条`);
+  ok('嵌套只发生在父 trace，子 trace 不套娃', !childTrace.some((e) => e.type === 'subagent_event'));
+
+  const jsonl = eventsToJsonl(trace).trim().split('\n');
+  ok('JSONL 导出包含嵌套事件', jsonl.some((l) => l.includes('"subagent_event"')), `${jsonl.length} 行`);
+  const md = sessionToMarkdown(parent2, trace);
+  ok('Markdown 导出用 ↳ 标出嵌套层级', md.includes('↳') && md.includes('子代理的事件以'));
+  const bundle = sessionToBundle(parent2, trace);
+  ok('JSON 快照里事件顺序保持嵌套原位', bundle.events.some((e) => e.type === 'subagent_event'));
+
+
   // ---- 1d. 工作流：每一步也是子代理 ----
   const wf = createWorkflowEngine({
     dir: path.resolve('workflows'),
@@ -234,6 +256,97 @@ section('[2] HTTP：前端只填 key、服务端环境没有 key');
       ok('子会话可单独查（kind=subagent）', s.kind === 'subagent' && s.parentId, `${s.kind} parent=${s.parentId}`);
       const tr = await (await fetch(`http://127.0.0.1:${PORT}/api/sessions/${subStart.agentId}/trace?format=jsonl`)).text();
       ok('子代理有独立 trace', tr.trim().split('\n').length > 3, `${tr.trim().split('\n').length} 条事件`);
+    }
+
+    // 父 trace 的导出里必须能看到嵌套
+    if (subStart) {
+      const parentId = (await (await fetch(`http://127.0.0.1:${PORT}/api/sessions?children=1`)).json()).find(
+        (x) => x.id !== subStart.agentId && x.kind !== 'subagent',
+      )?.id;
+      const parentJsonl = await (await fetch(`http://127.0.0.1:${PORT}/api/sessions/${parentId}/trace?format=jsonl`)).text();
+      ok('父 trace 导出包含嵌套事件', parentJsonl.includes('"subagent_event"'), `${parentJsonl.trim().split('\n').length} 行`);
+      const parentMd = await (await fetch(`http://127.0.0.1:${PORT}/api/sessions/${parentId}/trace?format=md`)).text();
+      ok('父 Markdown 导出标出嵌套层级', parentMd.includes('↳'));
+    }
+
+    // ---- 3. 界面：点进子代理的执行过程 ----
+    section('[3] 界面：点进子代理的执行过程');
+    {
+      const page = await openPage(`http://127.0.0.1:${PORT}`, { port: 9346, outDir: 'docs', freshProfile: true, width: 1400, height: 900 });
+      const { evalJs, waitFor, shot, sleep: wait } = page;
+      try {
+        await waitFor(`document.body.dataset.ready === '1'`, '前端就绪');
+        // 模拟「用户在前端设置里填了 key」：直接预置 localStorage 再刷新
+        const settings = {
+          provider: 'custom',
+          approvalMode: 'auto',
+          topK: 5,
+          profiles: { custom: { model: 'fake-1', apiKey: 'sk-ui', baseUrl: FAKE_BASE } },
+          sandbox: { scope: 'workspace', mode: 'write', backend: 'local', strict: true, customRoots: [] },
+        };
+        await evalJs(
+          `localStorage.setItem('mini-harness.settings.v1', ${JSON.stringify(JSON.stringify(settings))}); location.reload(); true`,
+        );
+        await waitFor(`document.body.dataset.ready === '1'`, '重新加载后就绪', 20000);
+
+        await evalJs(
+          `(() => { document.getElementById('input').value = '帮我委派一个子任务'; document.getElementById('send').click(); return true; })()`,
+        );
+        await waitFor(`!!document.querySelector('.agent-card .open-agent')`, '子代理卡片出现', 40000);
+        const cardMid = await evalJs(`document.querySelector('.agent-card').innerText.replace(/\\n/g, ' / ')`);
+        ok('对话里出现子代理卡片与「查看执行过程」按钮', true);
+        ok('卡片标明凭证来源', /凭证 本次请求/.test(cardMid), cardMid.slice(0, 100));
+
+        await waitFor(`document.getElementById('stop').hidden === true`, '本轮结束', 40000);
+        await wait(500);
+        const cardDone = await evalJs(`document.querySelector('.agent-card').innerText.replace(/\\n/g, ' / ')`);
+        ok('卡片显示步数与工具调用数', /\d+ 步 · \d+ 次工具调用/.test(cardDone), cardDone.slice(0, 110));
+
+        // 点开执行过程
+        await evalJs(`document.querySelector('.agent-card .open-agent').click(); true`);
+        await waitFor(
+          `!document.getElementById('agentModal').hidden && document.querySelectorAll('#agentSteps .step-tool, #agentSteps .step-item').length > 0`,
+          '执行过程弹窗',
+          20000,
+        );
+        const modal = JSON.parse(
+          await evalJs(`JSON.stringify({
+            title: document.getElementById('agentTitle').textContent,
+            meta: document.getElementById('agentMeta').textContent,
+            blocks: document.querySelectorAll('#agentSteps > *').length,
+            tools: [...document.querySelectorAll('#agentSteps .step-tool-name')].map(n => n.textContent),
+            roles: [...document.querySelectorAll('#agentSteps .step-role')].map(n => n.textContent),
+            events: document.querySelectorAll('#agentEvents .trace-row').length,
+          })`),
+        );
+        ok('弹窗标题是子代理描述', modal.title.length > 0, modal.title);
+        ok('弹窗显示模型/步数/工具数', /步/.test(modal.meta) && /工具调用/.test(modal.meta), modal.meta.slice(0, 90));
+        ok('执行轨迹渲染出子代理自己的对话', modal.blocks >= 2 && modal.roles.length >= 1, `${modal.blocks} 块 / ${modal.roles.join(',')}`);
+        ok('轨迹里能看到它调用的工具', modal.tools.length >= 1, modal.tools.join(', '));
+        ok('事件流面板有内容', modal.events > 0, `${modal.events} 条`);
+        const f = await shot('ui-agent.png');
+        console.log(`  ✓ 子代理执行过程截图 → ${f}`);
+
+        // Trace 面板里也应该看到嵌套分组
+        await evalJs(`document.getElementById('agentClose').click(); document.querySelector('.tab[data-tab="trace"]').click(); true`);
+        await wait(700);
+        await evalJs(`document.getElementById('traceRefresh').click(); true`);
+        await wait(900);
+        const nestedInfo = JSON.parse(
+          await evalJs(`JSON.stringify({
+            groups: document.querySelectorAll('#traceList .trace-group').length,
+            nestedRows: document.querySelectorAll('#traceList .trace-row.nested').length,
+            badges: [...document.querySelectorAll('#traceList .trace-badge')].map(n => n.textContent).filter(t => t.includes('子代理')).length,
+          })`),
+        );
+        ok('Trace 面板里子代理事件是嵌套分组', nestedInfo.groups >= 1 && nestedInfo.nestedRows >= 2, `${nestedInfo.groups} 组 / ${nestedInfo.nestedRows} 条嵌套行`);
+        await evalJs(`(() => { document.querySelector('#traceList .trace-group')?.scrollIntoView({ block: 'center' }); return true; })()`);
+        await wait(400);
+        const f2 = await shot('ui-agent-trace.png');
+        console.log(`  ✓ Trace 嵌套截图 → ${f2}`);
+      } finally {
+        page.close();
+      }
     }
   } finally {
     child.kill();

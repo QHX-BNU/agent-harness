@@ -301,9 +301,37 @@
       </div>
     </div>
 
+    <!-- 子代理执行过程 -->
+    <div id="agentModal" class="modal" hidden>
+      <div class="modal-card agent">
+        <header class="modal-head">
+          <span class="agent-dot"></span>
+          <strong id="agentTitle">子代理</strong>
+          <span class="dim" id="agentMeta"></span>
+          <span class="flex-1"></span>
+          <label class="inline dim" id="agentLiveWrap" hidden><input type="checkbox" id="agentLive" checked /> 实时</label>
+          <button id="agentRefresh" class="mini">刷新</button>
+          <button id="agentExportMd" class="mini">导出 md</button>
+          <button id="agentExportJsonl" class="mini">JSONL</button>
+          <button id="agentClose" class="icon-btn small">✕</button>
+        </header>
+        <div class="agent-body">
+          <section class="agent-pane">
+            <h5>执行轨迹</h5>
+            <div id="agentSteps" class="agent-steps"></div>
+          </section>
+          <section class="agent-pane">
+            <h5>事件流（嵌套在父 trace 的同一份数据）</h5>
+            <div id="agentEvents" class="trace-list tall"></div>
+          </section>
+        </div>
+      </div>
+    </div>
+
     <script src="/markdown.js"></script>
     <script src="/panels.js"></script>
     <script src="/trace.js"></script>
+    <script src="/agent.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

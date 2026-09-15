@@ -62,6 +62,7 @@
       todos: () => `${(ev.todos || []).filter((t) => t.status === 'completed').length}/${(ev.todos || []).length} 完成`,
       subagent_start: () => `${ev.description} · 深度 ${ev.depth}`,
       subagent_done: () => `${ev.description} · ${ev.steps} 步 · ${ev.toolCalls} 次工具`,
+      subagent_event: () => `[${ev.description || ev.agentId}] ${summarize(ev.event || {})}`,
       workflow_start: () => `${ev.name} · ${(ev.phases || []).join(' → ')}`,
       workflow_phase: () => `${ev.index}/${ev.total} ${ev.phase}`,
       workflow_step_start: () => `${ev.phase} · ${ev.label}`,
@@ -96,6 +97,7 @@
       todos: 'plan',
       subagent_start: 'agent',
       subagent_done: 'agent',
+      subagent_event: 'agent',
     };
     return table[type] || (String(type).startsWith('workflow_') ? 'workflow' : 'other');
   }
@@ -159,15 +161,31 @@
         box.append(el('div', 'dim', state.events.length ? '没有匹配的事件' : '还没有事件（发一条消息试试）'));
         continue;
       }
+      let lastAgent = null;
       rows.forEach((ev) => {
-        const row = el('div', `trace-row g-${ev.group}`);
+        // 子代理的事件嵌在父 trace 里：进入一个新子代理就先插一条分组标题
+        if (ev.type === 'subagent_event' && ev.agentId !== lastAgent) {
+          lastAgent = ev.agentId;
+          const groupHead = el('div', 'trace-group');
+          const btn = el('button', 'link-btn', '⇢ 子代理');
+          btn.title = '查看这个子代理的执行过程';
+          btn.onclick = () => window.AgentView?.open(ev.agentId, { description: ev.description, depth: ev.depth });
+          groupHead.append(btn, el('span', 'trace-group-desc', ev.description || ev.agentId));
+          box.append(groupHead);
+        }
+        if (ev.type !== 'subagent_event') lastAgent = null;
+
+        const nested = ev.type === 'subagent_event';
+        const inner = nested ? ev.event || {} : ev;
+        const row = el('div', `trace-row g-${ev.group}${nested ? ' nested' : ''}`);
         const head = el('div', 'trace-head');
         head.append(el('span', 'trace-time', hhmmss(ev.ts)));
-        head.append(el('span', `trace-badge g-${ev.group}`, GROUP_LABEL[ev.group] || ev.group));
-        head.append(el('span', 'trace-type', ev.type));
-        if (ev.merged > 1) head.append(el('span', 'trace-merged', `×${ev.merged}`));
+        head.append(el('span', `trace-badge g-${ev.group}`, nested ? '↳ 子代理' : GROUP_LABEL[ev.group] || ev.group));
+        head.append(el('span', 'trace-type', inner.type || ev.type));
+        const merged = ev.merged > 1 ? ev.merged : inner.merged;
+        if (merged > 1) head.append(el('span', 'trace-merged', `×${merged}`));
         row.append(head);
-        row.append(el('div', 'trace-summary', ev.summary));
+        row.append(el('div', 'trace-summary', nested ? summarize(inner) : ev.summary));
 
         const key = `${ev.ts}:${ev.type}:${ev.i ?? ''}`;
         const details = el('details', 'trace-raw');

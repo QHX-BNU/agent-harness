@@ -43,6 +43,11 @@ export function summarizeEvent(ev) {
       return `${ev.agentId} · ${ev.description} · 深度 ${ev.depth}`;
     case 'subagent_done':
       return `${ev.agentId} · ${ev.steps} 步 · ${ev.toolCalls} 次工具调用`;
+    case 'subagent_event': {
+      // 嵌套事件：子代理的一条事件被摊平进父 trace，前面标出它属于哪个子代理
+      const inner = ev.event || {};
+      return `↳ [${ev.description || ev.agentId}] ${summarizeEvent(inner)}`;
+    }
     case 'workflow_start':
       return `${ev.name} · ${(ev.phases || []).join(' → ')}`;
     case 'workflow_phase':
@@ -86,6 +91,7 @@ export const EVENT_GROUPS = {
   todos: 'plan',
   subagent_start: 'agent',
   subagent_done: 'agent',
+  subagent_event: 'agent',
 };
 
 export const groupOf = (type) => EVENT_GROUPS[type] || (type.startsWith('workflow_') ? 'workflow' : 'other');
@@ -185,11 +191,18 @@ export function sessionToMarkdown(session, events) {
 
   lines.push('## 事件轨迹');
   lines.push('');
+  lines.push('> 子代理的事件以 `↳` 嵌在父 trace 里，缩进表示它发生在哪个子代理内部。');
+  lines.push('');
   lines.push('| # | 时间 | 类型 | 摘要 |');
   lines.push('|---|---|---|---|');
   events.forEach((ev, i) => {
     const summary = summarizeEvent(ev).replace(/\|/g, '\\|');
-    lines.push(`| ${i + 1} | ${ts(ev.ts)} | ${ev.type} | ${summary} |`);
+    if (ev.type === 'subagent_event') {
+      const inner = ev.event || {};
+      lines.push(`| ↳ | ${ts(ev.ts)} | ↳ ${inner.type || 'event'} | ${summary} |`);
+    } else {
+      lines.push(`| ${i + 1} | ${ts(ev.ts)} | ${ev.type} | ${summary} |`);
+    }
   });
   lines.push('');
 

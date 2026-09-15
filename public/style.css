@@ -697,6 +697,78 @@ code.inline {
 .trace-raw pre { max-height: 220px; margin-top: 5px; padding-top: 12px; }
 .trace-export { display: flex; gap: 6px; align-items: center; margin-top: 10px; font-size: 12px; }
 
+/* 子代理在父 trace 里的嵌套分组 */
+.trace-group {
+  display: flex; align-items: center; gap: 7px;
+  margin: 8px 0 4px;
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--cyan) 8%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--cyan) 35%, var(--border));
+  font-size: 11.5px;
+}
+.trace-group-desc { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.link-btn {
+  border: none; background: transparent; padding: 0;
+  color: var(--cyan); font-size: 11.5px; font-weight: 600;
+}
+button.link-btn:hover { text-decoration: underline; background: transparent; border-color: transparent; }
+.trace-row.nested { margin-left: 18px; position: relative; }
+.trace-row.nested::before {
+  content: ''; position: absolute; left: -10px; top: 0; bottom: 0;
+  border-left: 1px dashed color-mix(in srgb, var(--cyan) 30%, var(--border));
+}
+.trace-row.nested .trace-badge { color: var(--cyan); border-color: color-mix(in srgb, var(--cyan) 40%, var(--border)); }
+
+/* ============ 子代理执行视图 ============ */
+.modal-card.agent { width: min(1180px, 97vw); }
+.agent-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--cyan);
+}
+.agent-dot.running { animation: pulse 1.2s infinite; box-shadow: 0 0 0 3px color-mix(in srgb, var(--cyan) 22%, transparent); }
+.agent-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0;
+  min-height: 0;
+  flex: 1;
+}
+.agent-pane { display: flex; flex-direction: column; min-height: 0; padding: 12px 14px; }
+.agent-pane + .agent-pane { border-left: 1px solid var(--border-soft); }
+.agent-pane h5 {
+  margin: 0 0 9px; font-size: 10.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .8px; color: var(--dim-2);
+}
+.agent-steps { overflow-y: auto; max-height: calc(88vh - 170px); display: flex; flex-direction: column; gap: 8px; }
+.step-item { border-left: 2px solid var(--border-hi); padding-left: 11px; }
+.step-item.assistant { border-left-color: var(--brand); }
+.step-role {
+  font-size: 10.5px; color: var(--dim-2); font-family: var(--mono);
+  text-transform: uppercase; letter-spacing: .6px; margin-bottom: 3px;
+}
+.step-text { font-size: 13px; color: var(--text-2); white-space: pre-wrap; word-break: break-word; }
+.step-text.md { white-space: normal; }
+.step-text.md p { margin: 0 0 8px; }
+.step-text.md p:last-child { margin-bottom: 0; }
+.step-tool {
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--warn);
+  border-radius: 9px;
+  background: var(--surface);
+  padding: 7px 10px;
+  font-size: 12px;
+}
+.step-tool.ok { border-left-color: var(--ok); }
+.step-tool.err { border-left-color: var(--err); }
+.step-tool-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.step-tool-name { font-family: var(--mono); font-size: 12px; color: var(--warn); font-weight: 600; }
+.step-tool.ok .step-tool-name { color: var(--ok); }
+.step-tool.err .step-tool-name { color: var(--err); }
+.step-tool details { margin-top: 5px; }
+.step-tool summary { cursor: pointer; color: var(--dim-2); font-size: 11px; }
+.agent-card .open-agent { margin-top: 7px; }
+
 /* ============ 弹窗 ============ */
 .modal {
   position: fixed; inset: 0; z-index: 50;

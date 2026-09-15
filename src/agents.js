@@ -98,11 +98,45 @@ export function createAgentRunner({ config, store, tools, memory, createProvider
         depth,
       });
 
+      // 增量合并缓冲：攒够一定长度或遇到结构化事件时才往父 trace 里写一条
+      const DELTA_FLUSH_CHARS = 400;
+      let deltaBuf = { kind: '', text: '', count: 0 };
+      const flushDelta = () => {
+        if (!deltaBuf.text) return;
+        emit?.({
+          type: 'subagent_event',
+          agentId: child.id,
+          description,
+          depth,
+          ts: Date.now(),
+          event: { type: deltaBuf.kind, text: deltaBuf.text, merged: deltaBuf.count },
+        });
+        deltaBuf = { kind: '', text: '', count: 0 };
+      };
+
       const childEmit = (ev) => {
-        // 子代理的事件不外泄原始内容流，只转发精简后的增量；trace 由 loop 落到子会话
+        // 子代理的事件要做两件事：
+        //   1) 流式增量转给父级（工作流用它做实时进度）
+        //   2) 结构化事件以 subagent_event 信封嵌进父 trace —— 父 trace 才是完整的执行记录
+        // 增量会先在本地攒起来再合并发出，避免几百条 delta 把父 trace 淹掉。
         if (ev.type === 'assistant_delta' || ev.type === 'reasoning_delta') {
           onDelta?.({ type: ev.type, text: ev.text });
+          if (deltaBuf.kind && deltaBuf.kind !== ev.type) flushDelta();
+          deltaBuf.kind = ev.type;
+          deltaBuf.text += ev.text;
+          deltaBuf.count += 1;
+          if (deltaBuf.text.length >= DELTA_FLUSH_CHARS) flushDelta();
+          return;
         }
+        flushDelta();
+        emit?.({
+          type: 'subagent_event',
+          agentId: child.id,
+          description,
+          depth,
+          ts: Date.now(),
+          event: ev,
+        });
       };
 
       try {
@@ -122,6 +156,7 @@ export function createAgentRunner({ config, store, tools, memory, createProvider
           agents: null, // 子代理不能再用 task 工具（深度限制已在上层保证，这里再收一道）
         });
       } finally {
+        flushDelta(); // 收尾：把没攒满的增量也写进父 trace
         release();
       }
 

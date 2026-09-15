@@ -13,6 +13,10 @@
 |---|---|
 | ![设置](docs/ui-settings.png) | ![Markdown](docs/ui-markdown.png) |
 
+| 子代理执行过程 | Trace 里的嵌套 |
+|---|---|
+| ![子代理](docs/ui-agent.png) | ![嵌套](docs/ui-agent-trace.png) |
+
 | 沙箱 · 作用区域与自测 | Trace 面板 |
 |---|---|
 | ![沙箱](docs/ui-sandbox.png) | ![Trace 面板](docs/ui-trace-tab.png) |
@@ -149,6 +153,42 @@ category: anchor / structure / knowledge / situation / self
   key 只在内存里流转，**不落盘**。
 - 子代理同样继承**沙箱**（作用区域只能收紧不能放宽）与工具注册表；记忆则只在主对话自动召回，
   子代理需要时自己用 `memory_*` 工具查。
+
+### 看子代理在干什么
+
+- **卡片实时进度**：委派后对话里会出现子代理卡片，运行中显示
+  `运行中 · 第 N 步 · M 次工具调用 · 正在做什么`，结束后变成 `N 步 · M 次工具调用 · 结论摘要`。
+- **点进去看执行过程**：卡片上的「查看执行过程 →」打开一个双栏视图——
+  左边是**子代理自己的对话轨迹**（任务 → 助手 → 工具调用 + 结果 → 助手…），
+  右边是它的事件流（可展开原始 JSON）。运行中每 1.2 秒自动刷新，也可以手动刷新 / 关掉实时。
+  顶部显示 `provider · model · 深度 · 凭证来源 · 状态 · 步数 · 工具调用数 · token`，
+  还能把该子代理的 trace 单独导出成 Markdown / JSONL。
+
+### Trace 是嵌套的
+
+子代理的事件不会只留在它自己的会话里——它们以 `subagent_event` 信封**嵌进父 trace**，
+所以父 trace 就是这一轮完整发生过的事：
+
+```
+tool_call   task({"description":"探查",...}) [allow]
+subagent_start  e2ad3a0e · 探查 · 深度 1
+┌ ⇢ 子代理 探查                        ← 分组标题，点一下直接进执行视图
+│  ↳ state           状态 → running
+│  ↳ step            第 1/8 次模型往返
+│  ↳ assistant_delta ×3  这是一段流式文本。
+│  ↳ tool_call       list_dir({"path":"./src"})
+│  ↳ tool_result     list_dir 成功 · 0ms · 314 字符
+│  ↳ done            2 步 · stop
+└
+subagent_done   e2ad3a0e · 2 步 · 1 次工具调用
+tool_result     task 成功
+```
+
+- 连续几百条 `assistant_delta` 会**在写进父 trace 前合并**成一条（带 `merged` 计数），
+  所以嵌套不会把父 trace 撑爆；子代理自己的 trace 里仍是原始逐条增量。
+- 导出的三种格式都保留嵌套：JSONL 里是 `subagent_event` 信封行，
+  JSON 快照保持事件原位，Markdown 用 `↳` 标出层级。
+- Trace 面板按「子代理」类别过滤时，看到的正是这些嵌套事件。
 
 ## 工作流
 
@@ -292,7 +332,7 @@ node scripts/ui-key-test.js    # 界面填 API key 专项：填 key → 测试�
 node scripts/trace-test.js     # Trace：事件记录 → 标签页/弹窗查看 → 三种格式导出（29 项）
 node scripts/sandbox-test.js   # 沙箱：作用区域/权限/命令扫描/环境清洗/后端/审计/界面（76 项）
 node scripts/markdown-test.js  # Markdown：65 条语法与安全断言 + 全特性渲染截图
-node scripts/agents-test.js    # 子代理：凭证继承（复现「前端配了 key 子代理却报缺 key」并锁死）
+node scripts/agents-test.js    # 子代理：凭证继承 + 嵌套 trace + 执行视图（45 项）
 ```
 
 `scripts/cdp.js` 是共享的浏览器驱动（Node 24 自带 WebSocket，零依赖），
