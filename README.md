@@ -220,6 +220,83 @@ tool_result     task 成功
 - 内置 `code-review`（结构/风险/测试三路并行 → 汇总）和 `research`（现状/对比/坑 → 结论）。
 - 三种触发方式：对话里让模型调用 `run_workflow`、右侧面板点「运行」、`POST /api/workflows/run`。
 
+## 飞书通道：群里 @ 机器人干活
+
+对标 [Claude Code in Slack](https://code.claude.com/docs/en/slack) / [Claude Code GitHub Actions](https://code.claude.com/docs/en/github-actions)
+里的 `@claude`：**在群里 @ 机器人，它就用工具去干活，结论回复到原消息**。
+不同的人、不同的群都可以 @ 它，而所有群共享同一个工作区——A 群沉淀的事实 B 群能召回，
+这就是「把分散的团队信息整合起来」。
+
+```
+飞书群「研发一组」                     飞书群「产品」
+  @小助手 看下构建为什么挂           ← 同一个人/不同的人都能 @
+        │                                  │
+        └──────────┬───────────────────────┘
+                   ▼
+        lark-cli event consume（WebSocket 长连接，不需要公网地址）
+                   ▼
+        每个「群 + 话题」= 一个 harness 会话（上下文各自连续）
+                   ▼
+        runTurn：工具 / 沙箱 / 记忆 / trace 与网页端完全同一套
+                   ▼
+        lark-cli im +messages-reply  ← 结论回到原消息（话题内）
+```
+
+### 怎么接
+
+```powershell
+$env:FEISHU_ENABLED="1"
+$env:FEISHU_BOT_NAME="小助手"        # 你的机器人名字，用于判断有没有被 @
+node server.js
+```
+
+启动后日志会打印 `飞书通道 = 已启动`；也可以不重启，用接口临时开关：
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:5175/api/channels/feishu/start -Method POST
+Invoke-WebRequest http://127.0.0.1:5175/api/channels/feishu/stop  -Method POST
+```
+
+**飞书那侧要做的**（一次性）：
+
+1. 开放平台创建**自建应用** → 开启「机器人」能力
+2. 权限：`im:message`（读消息）、`im:message:send_as_bot`（回消息）、`im:chat:read`（取群名）
+3. **事件订阅**：添加 `im.message.receive_v1`，接收方式选**长连接**（不需要公网 IP / 回调地址）
+4. 发布版本，然后把机器人**拉进群**（群设置 → 群机器人 → 添加）
+5. 让 `lark-cli` 用这个应用的身份：`lark-cli config init --new`（bot 身份只需 appId+appSecret）
+
+机器人的名字写进 `FEISHU_BOT_NAME` 就够了——**第一次被 @ 之后它会自动记住自己的 open_id**，
+之后改成按 id 判断，改名也不影响。群名也会自动查一次并缓存，会话标题直接用群名。
+
+### 行为细节
+
+| 情况 | 行为 |
+|---|---|
+| 群里 @ 机器人 | 处理并把结论回复到**话题内** |
+| 群里没 @ | 忽略（`FEISHU_REQUIRE_MENTION=0` 可改成全都响应） |
+| 私聊 | 不需要 @，直接处理 |
+| 同一个群的不同话题 | 各自独立的会话，上下文不串 |
+| 同一个群同一个话题 | 复用同一个会话，连续对话 |
+| 消息重复投递 | 按 `message_id` 去重，只处理一次 |
+| 别的机器人发的消息 | 忽略（不会自己回自己） |
+| 任务超过 15 秒 | 先回一句「还在处理…」，避免群里以为没反应 |
+| 结论很长 | 自动分片（默认 3000 字符/条，带 `(1/3)` 编号） |
+| 出错了 | 把错误和人话提示回给群里，不是静默失败 |
+
+### 跨群聚合能力
+
+- **共享记忆**：所有群共用一个工作区 → `workspace` 级记忆全局可见。
+  通道给模型的场景提示里明确要求：「群里沉淀下来的、以后还用得上的事实用 memory_add 写进 workspace 级记忆」。
+- **跨会话检索**：新增两个工具
+  - `session_list` —— 列出最近发生过的对话（哪个群、谁在什么时候聊的、最后结论摘要）
+  - `session_read` —— 读某个会话的最近消息，用来汇总上下文
+  于是「最近各组都在忙什么」「上次产品群说的排期是什么」这类问题可以被回答。
+- **trace 一样完整**：每个飞书会话都是普通会话，在网页端能看到完整对话与嵌套 trace，
+  也能导出 JSONL / JSON / Markdown。
+
+> 注意：跨会话检索意味着**任意群里的提问都能读到本工作区其他会话的内容**（这正是聚合的前提）。
+> 如果团队有隔离需求，用 `FEISHU_WORKSPACE_MAP` 把不同群放到不同工作区，记忆与检索就互相隔离了。
+
 ## 工作区：一个 harness，多个目录
 
 左栏按**工作区分组**，每个工作区下面是它自己的会话：
@@ -368,6 +445,8 @@ Invoke-WebRequest 'http://127.0.0.1:5175/api/sessions/export' -OutFile "backup-$
 |---|---|---|
 | GET/POST | `/api/workspaces` | 工作区列表（带会话数）/ 新建 |
 | PATCH/DELETE | `/api/workspaces/:id` | 重命名 / 移除（有会话时拒绝） |
+| GET | `/api/channels` | 飞书通道状态（running / ready / 处理计数 / 最后错误） |
+| POST | `/api/channels/feishu/start` `/stop` | 临时启停事件订阅（不用重启） |
 | GET | `/api/config` `/api/providers` `/api/tools` `/api/workflows` | 系统信息 |
 | POST | `/api/probe` | 真实打一次模型接口（可带 `apiKey`/`baseUrl`/`model`），返回延迟/用量/工具支持/模型列表 |
 | POST | `/api/tools/:name/toggle` | 启用/禁用工具 |
@@ -407,6 +486,7 @@ node scripts/sandbox-test.js   # 沙箱：作用区域/权限/命令扫描/环�
 node scripts/markdown-test.js  # Markdown：65 条语法与安全断言 + 全特性渲染截图
 node scripts/agents-test.js    # 子代理：凭证继承 + 嵌套 trace + 执行视图（45 项）
 node scripts/workspace-test.js # 多工作区：CRUD / 会话归属 / 跨工作区拦截 / 记忆隔离 / 侧栏分组（43 项）
+node scripts/feishu-test.js    # 飞书通道：@ 识别 / 去重 / 会话映射 / 跨群聚合 / 回复分片（37 项）
 ```
 
 `scripts/cdp.js` 是共享的浏览器驱动（Node 24 自带 WebSocket，零依赖），

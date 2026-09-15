@@ -2,7 +2,7 @@
 // 这是 harness 最容易被低估的部分——预算管理、记忆注入、系统提示共同决定上限。
 import { config } from './config.js';
 
-export function buildSystemPrompt({ workspace, workspaceName = '', tools, approvalMode, model, memoryText = '', todos = [], skills = [] }) {
+export function buildSystemPrompt({ workspace, workspaceName = '', tools, approvalMode, model, memoryText = '', todos = [], skills = [], channelPrompt = '' }) {
   const byCat = tools.reduce((acc, t) => {
     (acc[t.category || 'other'] = acc[t.category || 'other'] || []).push(t);
     return acc;
@@ -27,6 +27,10 @@ export function buildSystemPrompt({ workspace, workspaceName = '', tools, approv
     `## 可用工具
 ${toolList}`,
   ];
+
+  if (channelPrompt) {
+    sections.push(`## 当前场景\n${channelPrompt}`);
+  }
 
   if (memoryText) {
     sections.push(`## 相关长期记忆（自动召回，按需使用，不要照抄）

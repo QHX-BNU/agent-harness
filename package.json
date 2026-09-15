@@ -22,6 +22,7 @@
     "sandbox-test": "node scripts/sandbox-test.js",
     "markdown-test": "node scripts/markdown-test.js",
     "agents-test": "node scripts/agents-test.js",
-    "workspace-test": "node scripts/workspace-test.js"
+    "workspace-test": "node scripts/workspace-test.js",
+    "feishu-test": "node scripts/feishu-test.js"
   }
 }

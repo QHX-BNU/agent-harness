@@ -7,6 +7,11 @@ import { sandboxDefaults } from './sandbox.js';
 const env = process.env;
 const num = (v, d) => (v === undefined || v === '' ? d : Number(v));
 
+/** lark-cli 的 JS 入口：Windows 上 npm 装的是 .cmd/.ps1 shim，直接 spawn 会失败，所以跑它的真身 */
+const LARK_CLI_ENTRY =
+  env.LARK_CLI_ENTRY ||
+  path.join(env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming'), 'npm', 'node_modules', '@larksuite', 'cli', 'scripts', 'run.js');
+
 export const config = {
   // ---- 服务 ----
   port: num(env.PORT, 5175),
@@ -57,6 +62,35 @@ export const config = {
   artifactsDir: path.resolve(env.ARTIFACTS_DIR || '.artifacts'),
   // 删除的会话先进回收站（默认 .sessions-trash），确认无误再彻底清空
   trashDir: path.resolve(env.TRASH_DIR || '.sessions-trash'),
+
+  // ---- 飞书通道：群/私聊里 @ 机器人干活 ----
+  // 走 lark-cli 的 WebSocket 长连接收事件，不需要公网回调地址
+  feishu: {
+    enabled: env.FEISHU_ENABLED === '1',
+    // 启动 lark-cli 的方式：默认用 node 直接跑它的入口（Windows 上是 .cmd shim，直接 spawn 会失败）
+    cliCommand: env.FEISHU_CLI_COMMAND || process.execPath,
+    cliPrefix: env.FEISHU_CLI_ENTRY ? [path.resolve(env.FEISHU_CLI_ENTRY)] : [LARK_CLI_ENTRY],
+    eventKey: env.FEISHU_EVENT_KEY || 'im.message.receive_v1',
+    // 机器人自己的名字/open_id：用来判断有没有被 @
+    botName: env.FEISHU_BOT_NAME || '',
+    botAliases: (env.FEISHU_BOT_ALIASES || '').split(',').map((s) => s.trim()).filter(Boolean),
+    botOpenId: env.FEISHU_BOT_OPEN_ID || '',
+    requireMention: env.FEISHU_REQUIRE_MENTION !== '0',
+    replyInThread: env.FEISHU_REPLY_IN_THREAD !== '0',
+    // 飞书会话落到哪个工作区（也可以按 chat_id 指定：FEISHU_WORKSPACE_MAP='oc_xxx=wid,oc_yyy=wid2'）
+    workspaceId: env.FEISHU_WORKSPACE_ID || 'default',
+    workspaceByChat: Object.fromEntries(
+      (env.FEISHU_WORKSPACE_MAP || '')
+        .split(',')
+        .map((s) => s.split('='))
+        .filter((p) => p.length === 2)
+        .map(([k, v]) => [k.trim(), v.trim()]),
+    ),
+    approvalMode: env.FEISHU_APPROVAL_MODE || 'auto', // 机器人没人可问，默认自动放行
+    progressAfterMs: num(env.FEISHU_PROGRESS_AFTER_MS, 15000),
+    chunkSize: num(env.FEISHU_CHUNK_SIZE, 3000),
+    maxRestarts: num(env.FEISHU_MAX_RESTARTS, 5),
+  },
 };
 
 export function publicConfig() {

@@ -8,12 +8,14 @@ import { planTools } from './plan.js';
 import { agentTools } from './agent.js';
 import { workflowTools } from './workflow.js';
 import { artifactTools } from './artifact.js';
+import { digestTools } from './digest.js';
 
 export const BUILTIN = [
   ...fsTools,
   ...shellTools,
   ...memoryTools,
   ...planTools,
+  ...digestTools,
   ...agentTools,
   ...workflowTools,
   ...artifactTools,

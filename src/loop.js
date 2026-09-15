@@ -97,6 +97,7 @@ export async function runTurn({
       const system = buildSystemPrompt({
         workspace: config.workspace,
         workspaceName: config.workspaceName,
+        channelPrompt: config.channelPrompt,
         tools: tools.enabled,
         approvalMode: session.approvalMode || config.approvalMode,
         model: session.model,

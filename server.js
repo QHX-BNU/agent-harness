@@ -14,6 +14,7 @@ import { createToolRegistry } from './src/tools/index.js';
 import { createAgentRunner } from './src/agents.js';
 import { createWorkflowEngine } from './src/workflow.js';
 import { WorkspaceStore, DEFAULT_WORKSPACE_ID } from './src/workspaces.js';
+import { createFeishuChannel } from './src/channels/feishu.js';
 import { createProvider, listProviders, resolveProviderConfig } from './src/providers/index.js';
 import { createSandbox, SCOPE_PRESETS, MODES, backendAvailable } from './src/sandbox.js';
 import { runTurn } from './src/loop.js';
@@ -40,6 +41,19 @@ const broker = new ApprovalBroker(config.approvalTimeoutMs);
 const tools = createToolRegistry();
 const agents = createAgentRunner({ config, store, tools, memory, createProvider, policy: { broker } });
 const workflows = createWorkflowEngine({ dir: config.workflowsDir, agents, config });
+
+// 飞书通道：把「群里 @ 机器人」接到同一套内核上（工具/沙箱/记忆/trace 全部复用）
+const feishu = createFeishuChannel({
+  config,
+  store,
+  workspaces,
+  tools,
+  memory,
+  agents,
+  workflows,
+  broker,
+  stateFile: path.join(config.sessionsDir, '..', '.channels', 'feishu.json'),
+});
 
 const running = new Map(); // sessionId -> AbortController
 
@@ -545,6 +559,26 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // --- 通道（飞书机器人）---
+    if (req.method === 'GET' && p === '/api/channels') {
+      return json(res, 200, {
+        feishu: {
+          ...feishu.status(),
+          enabled: config.feishu.enabled,
+          botName: config.feishu.botName,
+          requireMention: config.feishu.requireMention,
+          workspaceId: config.feishu.workspaceId,
+          approvalMode: config.feishu.approvalMode,
+        },
+      });
+    }
+    if (req.method === 'POST' && p === '/api/channels/feishu/start') {
+      return json(res, 200, feishu.start());
+    }
+    if (req.method === 'POST' && p === '/api/channels/feishu/stop') {
+      return json(res, 200, feishu.stop());
+    }
+
     // --- 审批 ---
     if (req.method === 'GET' && p === '/api/approvals') return json(res, 200, broker.pendingList());
     if (req.method === 'POST' && p === '/api/approve') {
@@ -658,6 +692,12 @@ server.listen(config.port, config.host, () => {
   const trash = store.listTrash();
   console.log(`  会话 = ${sessions.length} 个（${config.sessionsDir}）· 回收站 = ${trash.length} 个（${config.trashDir}）`);
   if (sessions.length) console.log(`  最近会话 = ${sessions.slice(0, 3).map((s) => `${s.id}/${s.title || '未命名'}`).join(' · ')}`);
+  if (config.feishu.enabled) {
+    feishu.start();
+    console.log(`  飞书通道 = 已启动（@${config.feishu.botName || '机器人'} 触发，工作区 ${config.feishu.workspaceId}）`);
+  } else {
+    console.log('  飞书通道 = 未启用（设 FEISHU_ENABLED=1 打开；也可用 POST /api/channels/feishu/start 临时启动）');
+  }
   try {
     const p = createProvider({ provider: config.provider, model: config.model, baseUrl: config.baseUrl, apiKey: config.apiKey });
     console.log(`  默认模型 = ${p.id} · ${p.model}  (${p.protocol}, ${p.baseUrl || 'local'})`);
@@ -669,4 +709,4 @@ server.listen(config.port, config.host, () => {
   }
 });
 
-export { server, store, memory, tools, agents, workflows, STATUS };
+export { server, store, memory, tools, agents, workflows, workspaces, feishu, STATUS };

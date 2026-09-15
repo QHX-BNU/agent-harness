@@ -1,0 +1,336 @@
+// 飞书通道测试：@ 识别 / 去重 / 会话映射 / 跨群记忆 / 回复分片 / 真实子进程契约 / 服务接口。
+// 用法: node scripts/feishu-test.js [baseUrl]
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+
+import { config } from '../src/config.js';
+import { SessionStore } from '../src/store.js';
+import { MemoryStore } from '../src/memory.js';
+import { ApprovalBroker, Policy } from '../src/policy.js';
+import { createToolRegistry } from '../src/tools/index.js';
+import { createAgentRunner } from '../src/agents.js';
+import { createWorkflowEngine } from '../src/workflow.js';
+import { createProvider } from '../src/providers/index.js';
+import { createFeishuChannel, chunkMessage } from '../src/channels/feishu.js';
+import { WorkspaceStore } from '../src/workspaces.js';
+import { startFakeLLM } from './fake-llm.js';
+
+const BASE = process.argv[2] || 'http://127.0.0.1:5175';
+let pass = 0;
+let fail = 0;
+const ok = (name, cond, extra = '') => {
+  if (cond) {
+    pass++;
+    console.log(`  ✓ ${name}${extra ? ` — ${extra}` : ''}`);
+  } else {
+    fail++;
+    console.log(`  ✗ ${name}${extra ? ` — ${extra}` : ''}`);
+  }
+};
+const section = (t) => console.log(`\n${t}`);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-'));
+const fake = await startFakeLLM();
+
+const testConfig = {
+  ...config,
+  sessionsDir: path.join(tmp, '.sessions'),
+  artifactsDir: path.join(tmp, '.artifacts'),
+  trashDir: path.join(tmp, '.sessions-trash'),
+  memoryDir: path.join(tmp, '.memory'),
+  workflowsDir: path.resolve('workflows'),
+  workspace: tmp,
+  maxSteps: 3,
+  maxAgentDepth: 1,
+  maxConcurrentAgents: 1,
+  modelTimeoutMs: 15000,
+  modelRetries: 0,
+  memoryTopK: 3,
+  feishu: {
+    enabled: false,
+    cliCommand: process.execPath,
+    cliPrefix: [],
+    botName: '小助手',
+    botAliases: ['Helper'],
+    botOpenId: 'ou_bot_123',
+    requireMention: true,
+    replyInThread: true,
+    workspaceId: 'default',
+    workspaceByChat: {},
+    approvalMode: 'auto',
+    progressAfterMs: 60000,
+    chunkSize: 3000,
+    maxRestarts: 0,
+  },
+};
+
+const store = new SessionStore({ dir: testConfig.sessionsDir, artifactsDir: testConfig.artifactsDir, trashDir: testConfig.trashDir });
+const memory = new MemoryStore({ dir: testConfig.memoryDir, workspaceId: 'default' });
+const workspaces = new WorkspaceStore({ file: path.join(tmp, '.workspaces.json'), defaultPath: tmp });
+const tools = createToolRegistry();
+const broker = new ApprovalBroker(1500);
+const provider = () =>
+  createProvider({ provider: 'custom', model: 'fake-1', baseUrl: fake.baseUrl, apiKey: 'k', retries: 0 });
+const agents = createAgentRunner({ config: testConfig, store, tools, memory, createProvider: provider, policy: { broker } });
+const workflows = createWorkflowEngine({ dir: testConfig.workflowsDir, agents, config: testConfig });
+
+/** 记录所有「回复」调用，替代真实的 lark-cli */
+const replies = [];
+const cliCalls = [];
+const fakeSpawn = (cmd, args) => {
+  const rec = { cmd, args };
+  cliCalls.push(args.join(' '));
+  let stdout = '';
+  if (args.includes('+messages-reply')) {
+    const i = args.indexOf('--markdown') >= 0 ? args.indexOf('--markdown') : args.indexOf('--text');
+    rec.messageId = args[args.indexOf('--message-id') + 1];
+    rec.body = args[i + 1];
+    rec.inThread = args.includes('--reply-in-thread');
+    replies.push(rec);
+  } else if (args.includes('chats') && args.includes('get')) {
+    // 模拟 im chats get 返回群名
+    stdout = JSON.stringify({ ok: true, data: { chat: { chat_id: args[args.indexOf('--chat-id') + 1], name: '研发一组' } } });
+  }
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = () => {};
+  setImmediate(() => {
+    if (stdout) child.stdout.emit('data', Buffer.from(stdout));
+    child.emit('close', 0);
+  });
+  return child;
+};
+
+const channel = createFeishuChannel({
+  config: testConfig,
+  store,
+  workspaces,
+  tools,
+  memory,
+  agents,
+  workflows,
+  broker,
+  stateFile: path.join(tmp, '.channels', 'feishu.json'),
+  log: () => {},
+  spawnImpl: fakeSpawn,
+  providerFactory: provider,
+});
+
+const events = [];
+channel.onEvent((e) => events.push(e));
+
+const msg = (over = {}) => ({
+  type: 'im.message.receive_v1',
+  message_id: `om_${Math.random().toString(36).slice(2, 10)}`,
+  chat_id: 'oc_group_1',
+  chat_type: 'group',
+  message_type: 'text',
+  sender_type: 'user',
+  sender_id: 'ou_alice',
+  sender_name: '爱丽丝',
+  content: '@小助手 看一下这个项目',
+  mentions: [{ id: 'ou_bot_123', key: '@_user_1', name: '小助手' }],
+  create_time: String(Date.now()),
+  ...over,
+});
+
+// ================= 1. @ 识别与过滤 =================
+section('[1] 谁的消息才处理');
+{
+  replies.length = 0;
+  const r1 = await channel.handleEvent(msg());
+  ok('群里 @ 机器人 → 处理并回复', r1.ok && replies.length === 1, r1.ok ? replies[0].body.slice(0, 40).replace(/\n/g, ' ') : r1.reason);
+
+  const r2 = await channel.handleEvent(msg({ message_id: 'om_nomention', mentions: [], content: '大家好' }));
+  ok('群里没 @ 机器人 → 忽略', r2.reason === 'not_addressed', r2.reason);
+
+  const r3 = await channel.handleEvent(msg({ sender_type: 'bot', mentions: [] }));
+  ok('别的机器人发的 → 忽略', r3.reason === 'from_bot', r3.reason);
+
+  const r4 = await channel.handleEvent(msg({ message_type: 'image', content: '' }));
+  ok('非文本消息 → 忽略', r4.reason === 'unsupported_type', r4.reason);
+
+  const dup = msg();
+  const d1 = await channel.handleEvent(dup);
+  const d2 = await channel.handleEvent(dup);
+  ok('同一条消息重复投递只处理一次', d1.ok && d2.reason === 'duplicate', `${d1.ok} / ${d2.reason}`);
+
+  const p2p = await channel.handleEvent(msg({ chat_id: 'oc_p2p_1', chat_type: 'p2p', mentions: [], content: '帮我看看构建' }));
+  ok('私聊不需要 @ 也处理', p2p.ok, p2p.reason || '');
+
+  const alias = await channel.handleEvent(msg({ message_id: 'om_alias', mentions: [{ id: 'ou_bot_123', key: '@_user_1', name: 'Helper' }], content: '@Helper 查个东西' }));
+  ok('别名 @ 也认', alias.ok, alias.reason || '');
+
+  const atText = await channel.handleEvent(msg({ message_id: 'om_empty', content: '@小助手', mentions: [{ id: 'ou_bot_123', key: '@_user_1', name: '小助手' }] }));
+  ok('只 @ 不说话 → 回提示', atText.ok && /直接说需求/.test(replies.at(-1).body), replies.at(-1)?.body.slice(0, 30));
+}
+
+// ================= 2. 会话映射 =================
+section('[2] 群/话题 → 会话映射');
+{
+  const s1 = channel.state.sessions['oc_group_1:main'];
+  ok('群消息落到一个会话', Boolean(s1) && store.get(s1), s1);
+
+  const sameAgain = await channel.handleEvent(msg({ chat_id: 'oc_group_1', content: '@小助手 再问一个' }));
+  ok('同一个群继续用同一个会话', channel.state.sessions['oc_group_1:main'] === s1 && sameAgain.sessionId === s1);
+
+  await channel.handleEvent(msg({ chat_id: 'oc_group_1', thread_id: 'omt_thread_a', message_id: 'om_t1', content: '@小助手 话题里问' }));
+  const threadKey = channel.state.sessions['oc_group_1:omt_thread_a'];
+  ok('不同话题用不同会话', Boolean(threadKey) && threadKey !== s1, threadKey);
+
+  await channel.handleEvent(msg({ chat_id: 'oc_group_2', message_id: 'om_g2', content: '@小助手 另一个群' }));
+  const other = channel.state.sessions['oc_group_2:main'];
+  ok('不同群用不同会话', Boolean(other) && other !== s1, other);
+
+  const sess = store.get(s1);
+  ok('会话记录了来源（群/话题）', sess.channel?.type === 'feishu' && sess.channel.chatId === 'oc_group_1', JSON.stringify(sess.channel));
+  ok('映射落盘可恢复', fs.existsSync(path.join(tmp, '.channels', 'feishu.json')));
+  ok('会话里能看出说话人', (sess.messages[0]?.content || '').includes('爱丽丝'), (sess.messages[0]?.content || '').slice(0, 50));
+  ok('自动查到了群名并写进标题', sess.title === '研发一组', sess.title);
+  const g1Calls = cliCalls.filter((c) => c.includes('chats get') && c.includes('oc_group_1')).length;
+  ok('同一群名只查一次（之后走缓存）', (await channel.ensureChatName('oc_group_1')) === '研发一组' && g1Calls === 1, `oc_group_1 查了 ${g1Calls} 次`);
+}
+
+// ================= 2b. 零配置：自动学机器人 open_id =================
+section('[2b] 免抄 open_id');
+{
+  const ch = createFeishuChannel({
+    config: { ...testConfig, feishu: { ...testConfig.feishu, botOpenId: '' } },
+    store,
+    workspaces,
+    tools,
+    memory,
+    agents,
+    workflows,
+    broker,
+    stateFile: path.join(tmp, '.channels', 'feishu-learn.json'),
+    log: () => {},
+    spawnImpl: fakeSpawn,
+    providerFactory: provider,
+  });
+  ok('初始不知道自己的 open_id', ch.status().botOpenId === null);
+  await ch.handleEvent(msg({ chat_id: 'oc_learn', message_id: 'om_learn', mentions: [{ id: 'ou_real_bot', key: '@_user_1', name: '小助手' }] }));
+  ok('从名字匹配里学到了 open_id', ch.status().botOpenId === 'ou_real_bot', ch.status().botOpenId);
+  ok('学到之后按 id 判断 @', ch.state.botOpenId === 'ou_real_bot');
+  const again = await ch.handleEvent(msg({ chat_id: 'oc_learn', message_id: 'om_learn2', mentions: [{ id: 'ou_real_bot', key: '@_user_1', name: '改了个名' }] }));
+  ok('名字变了也能认出来（认 id 了）', again.ok, again.reason || '');
+}
+
+// ================= 3. 跨群记忆 =================
+section('[3] 跨群信息聚合');
+{
+  // 在 A 群沉淀一条 workspace 级记忆
+  const aSess = store.get(channel.state.sessions['oc_group_1:main']);
+  memory.add({
+    content: '项目 X 的发布窗口定在每周四下午', scope: 'workspace', category: 'knowledge',
+    importance: 0.9, workspaceId: aSess.workspaceId, sessionId: aSess.id,
+  });
+
+  events.length = 0;
+  await channel.handleEvent(msg({ chat_id: 'oc_group_2', message_id: 'om_recall', content: '@小助手 项目 X 什么时候发布？' }));
+  const recall = events.find((e) => e.type === 'memory_recall');
+  ok('B 群能召回 A 群沉淀的记忆', Boolean(recall) && recall.hits.some((h) => /发布窗口/.test(h.content)), recall ? recall.hits.map((h) => h.content).join(' | ').slice(0, 60) : '(无召回)');
+
+  // 跨会话清单工具
+  const listRes = await tools.execute('session_list', { limit: 10 }, {
+    session: aSess,
+    store,
+    memory,
+    workspaceId: aSess.workspaceId,
+    config: testConfig,
+  });
+  ok('session_list 能跨会话列出最近对话', listRes.ok && /飞书/.test(listRes.content), listRes.content.split('\n')[1]?.slice(0, 70));
+
+  const readRes = await tools.execute('session_read', { session: aSess.id, limit: 4 }, { session: aSess, store, memory, config: testConfig });
+  ok('session_read 能读另一个群的对话', readRes.ok && readRes.content.includes('oc_group_1') === false && readRes.content.length > 20, readRes.content.split('\n')[0].slice(0, 60));
+}
+
+// ================= 4. 回复内容与分片 =================
+section('[4] 回复');
+{
+  replies.length = 0;
+  await channel.handleEvent(msg({ chat_id: 'oc_group_3', message_id: 'om_reply', content: '@小助手 说点什么' }));
+  ok('回复到原消息（thread 内）', replies.length === 1 && replies[0].messageId === 'om_reply' && replies[0].inThread === true);
+  ok('回复用 markdown 且带模型结论', /流式文本|我调用了/.test(replies[0].body), replies[0].body.slice(0, 50).replace(/\n/g, ' '));
+
+  const long = 'A'.repeat(7000);
+  const parts = chunkMessage(long, 3000);
+  ok('超长回复会分片', parts.length === 3 && parts.every((p) => p.length <= 3000), `${parts.length} 片`);
+  ok('空回复有兜底文案', chunkMessage('')[0] === '（没有产出内容）');
+}
+
+// ================= 5. 审批模式下不会卡死 =================
+section('[5] 无人可问时的审批');
+{
+  const saved = channel.status;
+  void saved;
+  const strictConfig = { ...testConfig, feishu: { ...testConfig.feishu, approvalMode: 'ask' } };
+  const ch2 = createFeishuChannel({
+    config: strictConfig,
+    store,
+    workspaces,
+    tools,
+    memory,
+    agents,
+    workflows,
+    broker: new ApprovalBroker(800), // 没人点 → 800ms 后自动拒绝
+    stateFile: path.join(tmp, '.channels', 'feishu2.json'),
+    log: () => {},
+    spawnImpl: fakeSpawn,
+    providerFactory: provider,
+  });
+  replies.length = 0;
+  const r = await ch2.handleEvent(msg({ chat_id: 'oc_ask', message_id: 'om_ask', content: '创建 demo/x.txt 文件' }));
+  ok('审批超时后仍能给出回复（不卡死）', r.ok && replies.length >= 1, replies.at(-1)?.body.slice(0, 60).replace(/\n/g, ' '));
+}
+
+// ================= 6. 真实子进程契约 =================
+section('[6] 真实 lark-cli 子进程契约');
+{
+  const entry = config.feishu.cliPrefix[0];
+  if (!fs.existsSync(entry)) {
+    console.log('  ⊘ 本机没有 lark-cli，跳过（部署机上会跑）');
+  } else {
+    const p = spawn(process.execPath, [entry, 'event', 'consume', 'im.message.receive_v1', '--as', 'bot', '--timeout', '4s'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    let err = '';
+    p.stderr.on('data', (d) => (err += d.toString()));
+    const code = await new Promise((res) => p.on('close', res));
+    ok('能启动事件订阅并打出 ready 标记', /\[event\] ready event_key=im\.message\.receive_v1/.test(err));
+    ok('超时后优雅退出（code 0）', code === 0, `code=${code}`);
+    ok('退出原因可读', /reason: timeout/.test(err));
+  }
+}
+
+// ================= 7. 服务接口 =================
+section('[7] 服务接口');
+{
+  const r = await fetch(`${BASE}/api/channels`);
+  const data = await r.json().catch(() => null);
+  if (r.ok && data?.feishu) {
+    ok('GET /api/channels 返回飞书通道状态', typeof data.feishu.running === 'boolean', `running=${data.feishu.running} ready=${data.feishu.ready}`);
+    ok('状态里带配置信息', data.feishu.requireMention !== undefined && 'approvalMode' in data.feishu);
+    const started = await (await fetch(`${BASE}/api/channels/feishu/start`, { method: 'POST' })).json();
+    await sleep(3500);
+    const st = await (await fetch(`${BASE}/api/channels`)).json();
+    ok('POST start 能拉起订阅', started.running === true && st.feishu.running === true, `ready=${st.feishu.ready}`);
+    ok('订阅就绪标记变 true', st.feishu.ready === true);
+    const stopped = await (await fetch(`${BASE}/api/channels/feishu/stop`, { method: 'POST' })).json();
+    ok('POST stop 能停掉订阅', stopped.running === false);
+  } else {
+    console.log('  ⊘ 服务未运行或版本较旧，跳过接口检查');
+  }
+}
+
+await fake.close();
+fs.rmSync(tmp, { recursive: true, force: true });
+
+console.log(`\n${fail === 0 ? '✓' : '✗'} 飞书通道测试: ${pass} 通过 / ${fail} 失败`);
+process.exit(fail === 0 ? 0 : 1);
