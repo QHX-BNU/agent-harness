@@ -1,0 +1,46 @@
+version: "3.9"
+
+# 一条命令起服务：docker compose up -d
+# 打开 http://127.0.0.1:5175
+#
+# 用之前只有一处要改：下面 volumes 里 workspace 的路径，指向你要让 agent 干活的项目目录。
+services:
+  harness:
+    build:
+      context: .
+      # 想用官方 Node 运行时（约 56MB）就把下面两行换成：
+      # dockerfile: Dockerfile.node
+    image: mini-harness:latest
+    container_name: mini-harness
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:5175:5175" # 只绑本机；要让同事访问改成 "5175:5175"
+
+    # 模型凭证放同目录的 .env 文件里（别写进这个文件）：
+    #   PROVIDER=deepseek
+    #   API_KEY=sk-xxx
+    env_file:
+      - path: .env
+        required: false
+
+    volumes:
+      # ① 项目目录：agent 干活的地方（要允许写就别加 :ro）
+      - ./demo:/workspace
+      # ② 运行态数据：会话 / 记忆 / 产物（删容器也不丢）
+      - harness-data:/data
+
+    # 安全加固：根文件系统只读、/tmp 用内存、禁止提权
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+    # 想限制资源就打开
+    # deploy:
+    #   resources:
+    #     limits: { cpus: "2", memory: 1g }
+
+volumes:
+  harness-data:

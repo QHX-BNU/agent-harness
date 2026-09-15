@@ -419,6 +419,54 @@ curl http://127.0.0.1:5175/api/identities
 
 配置存在 `.workspaces.json`，会话记录自己的 `workspaceId`。历史会话没有这个字段时按默认工作区处理。
 
+## 怎么跑
+
+**最快的方式**：本项目零依赖，装了 Node 就能跑，不用 `npm install`。
+
+```powershell
+node server.js          # 打开 http://127.0.0.1:5175
+```
+
+**要隔离就用容器**（镜像约 40MB）：
+
+```powershell
+# Windows
+docker-run.cmd  D:\my-project      # 不传参数就用当前目录当工作区
+```
+```bash
+# Linux / macOS
+./docker-run.sh ~/my-project
+```
+
+或者手动两步：
+
+```bash
+docker build -t mini-harness .
+docker run --rm -p 5175:5175 -v "$PWD:/workspace" mini-harness
+```
+
+| 镜像 | 压缩后 | 说明 |
+|---|---|---|
+| `Dockerfile`（默认） | **约 40MB** | Bun 运行时，Alpine 基础层，自带 `sh` |
+| `Dockerfile.node` | 约 56MB | 官方 Node 运行时，最大兼容性 |
+
+为什么能这么小：本项目只用 Node 内置模块，**不需要 npm install**；Node 官方镜像里那 51MB 的发行版
+含 npm / corepack / C++ 头文件，这里全都用不上。Bun 是单文件运行时，本项目**全部测试（10 个套件 +
+端到端 + 界面检查）在 Bun 下同样通过**。
+
+容器里跑的时候：
+
+- `/workspace` 是 agent 干活的项目目录（**挂载你自己的工作目录进去**）
+- `/data` 是持久化的会话/记忆/产物（用卷，删容器也不丢）
+- 容器本身就是隔离边界：文件工具被沙箱限制在 `/workspace` 内，越界路径和危险命令一律拒绝
+- 根文件系统只读 + `/tmp` 用内存 + 非 root 用户运行
+
+进来看看环境对不对：
+
+```bash
+docker run --rm -e CONTAINER_SELFCHECK=1 -v "$PWD:/workspace" mini-harness
+```
+
 ## 数据存在哪 / 会不会丢
 
 会话、trace、记忆、产物全部落在工作区目录下，**服务重启不会丢**：
@@ -577,8 +625,16 @@ node scripts/sandbox-test.js   # 沙箱：作用区域/权限/命令扫描/环�
 node scripts/markdown-test.js  # Markdown：65 条语法与安全断言 + 全特性渲染截图
 node scripts/agents-test.js    # 子代理：凭证继承 + 嵌套 trace + 执行视图（45 项）
 node scripts/workspace-test.js # 多工作区：CRUD / 会话归属 / 跨工作区拦截 / 记忆隔离 / 侧栏分组（43 项）
-node scripts/feishu-test.js    # 飞书通道：@ 识别 / 去重 / 会话映射 / 跨群聚合 / 回复分片（37 项）
+node scripts/feishu-test.js    # 飞书通道：@ 识别 / 去重 / 会话映射 / 跨群聚合 / 回复分片 / 私聊隔离（73 项）
+node scripts/docker-check.js   # 容器配置：镜像/变量/挂载/entrypoint 一致性（44 项，不需要 Docker）
+node scripts/container-check.js # 容器内自检：工作区/数据目录/端口/沙箱边界/真跑一次工具（23 项）
 ```
+
+容器相关的两个检查是分开的：`docker-check` 在**开发机上**跑（校验 Dockerfile / compose /
+entrypoint 与代码一致，抓「配置写错但 build 才发现」），`container-check` 在**容器里**跑
+（`docker run -e CONTAINER_SELFCHECK=1 ...` 会随启动自动执行）。
+
+上面所有套件都在 Node 和 Bun 下验证过（`bun scripts/harness-test.js` 同样通过）。
 
 `scripts/cdp.js` 是共享的浏览器驱动（Node 24 自带 WebSocket，零依赖），
 `scripts/fake-llm.js` 是一个假的 OpenAI + Anthropic 兼容服务（跨 chunk 的 tool_calls JSON、

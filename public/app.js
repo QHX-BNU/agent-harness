@@ -596,9 +596,11 @@
         card.innerHTML =
           `<div class="head">⇢ 子代理 · <span class="name"></span></div>` +
           `<div class="body"></div>` +
+          `<div class="summary dim"></div>` +
           `<div class="live dim"></div>`;
         card.querySelector('.name').textContent = ev.description;
         const cred = { request: '本次请求', 'request(baseUrl only)': '本次请求(仅端点)', 'server-env': '服务端环境变量' }[ev.credentialSource] || ev.credentialSource || '本次请求';
+        // 这行是「这个子代理用的是哪套凭证」的唯一提示，跑完也不能被摘要冲掉
         card.querySelector('.body').textContent = `${ev.provider ? `${ev.provider} · ` : ''}${ev.model} · 深度 ${ev.depth} · 凭证 ${cred}`;
         const btn = el('button', 'mini open-agent', '查看执行过程 →');
         btn.onclick = () =>
@@ -641,7 +643,10 @@
         const card = state.toolCards.get(`agent:${ev.agentId}`);
         if (card) {
           card.querySelector('.head').textContent = `⇠ 子代理 ${ev.description} 结束`;
-          card.querySelector('.body').textContent = `${ev.steps} 步 · ${ev.toolCalls} 次工具调用 · ${(ev.summary || '').slice(0, 200)}`;
+          // 摘要单独一行：正文那行（provider/model/凭证）要一直留着
+          const summary = card.querySelector('.summary');
+          if (summary) summary.textContent = `${ev.steps} 步 · ${ev.toolCalls} 次工具调用 · ${(ev.summary || '').slice(0, 200)}`;
+          else card.querySelector('.body').textContent = `${ev.steps} 步 · ${ev.toolCalls} 次工具调用 · ${(ev.summary || '').slice(0, 200)}`;
           const live = card.querySelector('.live');
           if (live) live.textContent = '';
           const btn = card.querySelector('.open-agent');

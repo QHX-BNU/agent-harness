@@ -1,0 +1,36 @@
+# 备选：官方 Node 运行时的版本（压缩后约 56MB）
+#
+#   docker build -f Dockerfile.node -t mini-harness:node .
+#   docker run --rm -p 5175:5175 -v "${PWD}:/workspace" mini-harness:node
+#
+# 什么时候用它：想要官方 Node 运行时、或者 Bun 在你的环境里跑不起来。
+# 功能与默认的 Dockerfile 完全一致，只是运行时换成 node。
+FROM node:24-alpine
+
+WORKDIR /app
+COPY . /app
+
+RUN chmod +x /app/docker/entrypoint.sh \
+ && mkdir -p /data /workspace \
+ && chown -R node:node /data /workspace /app
+
+ENV HOST=0.0.0.0 \
+    PORT=5175 \
+    WORKSPACE=/workspace \
+    SESSIONS_DIR=/data/.sessions \
+    TRASH_DIR=/data/.sessions-trash \
+    ARTIFACTS_DIR=/data/.artifacts \
+    MEMORY_DIR=/data/.memory \
+    WORKFLOWS_DIR=/app/workflows \
+    SANDBOX_SCOPE=workspace \
+    SANDBOX_BACKEND=local \
+    APPROVAL_MODE=ask
+
+USER node
+EXPOSE 5175
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- "http://127.0.0.1:${PORT}/api/config" >/dev/null 2>&1 || exit 1
+
+ENTRYPOINT ["/app/docker/entrypoint.sh"]
+CMD ["node", "server.js"]
