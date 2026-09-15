@@ -266,6 +266,7 @@ async function handleChat(req, res) {
       retries: config.modelRetries,
     });
     session.model = provider.model;
+    session.provider = provider.id;
   } catch (err) {
     return json(res, 400, { error: err.message, hint: err.hint || '' });
   }
@@ -577,19 +578,41 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         feishu: {
           ...feishu.status(),
+          ...feishu.describe(),
           enabled: config.feishu.enabled,
-          botName: config.feishu.botName,
-          requireMention: config.feishu.requireMention,
-          workspaceId: config.feishu.workspaceId,
-          approvalMode: config.feishu.approvalMode,
         },
       });
+    }
+    if (req.method === 'POST' && p === '/api/channels/feishu/config') {
+      const body = await readBody(req);
+      feishu.configure(body);
+      return json(res, 200, { ok: true, config: feishu.describe(), status: feishu.status() });
     }
     if (req.method === 'POST' && p === '/api/channels/feishu/start') {
       return json(res, 200, feishu.start());
     }
     if (req.method === 'POST' && p === '/api/channels/feishu/stop') {
       return json(res, 200, feishu.stop());
+    }
+    // 模拟入站消息：真跑模型与工具，但不往飞书发消息（用来验证跨群等行为）
+    if (req.method === 'POST' && p === '/api/channels/feishu/simulate') {
+      const body = await readBody(req);
+      const chatId = String(body.chatId || body.chat_id || '').trim();
+      const content = String(body.content || body.message || '').trim();
+      if (!chatId || !content) return json(res, 400, { error: 'chatId 和 content 都不能为空' });
+      try {
+        const r = await feishu.simulate({
+          chatId,
+          chatType: body.chatType || 'group',
+          senderId: body.senderId || 'ou_simulated_user',
+          senderName: body.senderName || '模拟用户',
+          content,
+          mentions: body.mentions,
+        });
+        return json(res, 200, r);
+      } catch (err) {
+        return json(res, 500, { error: err.message });
+      }
     }
 
     // --- 审批 ---

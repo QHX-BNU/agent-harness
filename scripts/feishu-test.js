@@ -94,6 +94,18 @@ const fakeSpawn = (cmd, args) => {
   } else if (args.includes('chats') && args.includes('get')) {
     // 模拟 im chats get 返回群名
     stdout = JSON.stringify({ ok: true, data: { chat: { chat_id: args[args.indexOf('--chat-id') + 1], name: '研发一组' } } });
+  } else if (args.includes('+chat-members-list')) {
+    // 模拟群成员列表（说话人姓名来源）
+    stdout = JSON.stringify({
+      ok: true,
+      data: {
+        users: [
+          { member_id: 'ou_alice', name: '爱丽丝' },
+          { member_id: 'ou_bob', name: '小明' },
+        ],
+        bots: [{ member_id: 'ou_bot_123', name: '小助手' }],
+      },
+    });
   }
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
@@ -175,6 +187,7 @@ section('[2] 群/话题 → 会话映射');
 {
   const s1 = channel.state.sessions['oc_group_1:main'];
   ok('群消息落到一个会话', Boolean(s1) && store.get(s1), s1);
+  const state0 = s1;
 
   const sameAgain = await channel.handleEvent(msg({ chat_id: 'oc_group_1', content: '@小助手 再问一个' }));
   ok('同一个群继续用同一个会话', channel.state.sessions['oc_group_1:main'] === s1 && sameAgain.sessionId === s1);
@@ -194,6 +207,18 @@ section('[2] 群/话题 → 会话映射');
   ok('自动查到了群名并写进标题', sess.title === '研发一组', sess.title);
   const g1Calls = cliCalls.filter((c) => c.includes('chats get') && c.includes('oc_group_1')).length;
   ok('同一群名只查一次（之后走缓存）', (await channel.ensureChatName('oc_group_1')) === '研发一组' && g1Calls === 1, `oc_group_1 查了 ${g1Calls} 次`);
+
+  // 说话人姓名：事件里只有 open_id，得靠群成员列表补名字
+  const sessNow = store.get(state0);
+  const firstUserMsg = sessNow.messages.find((m) => m.role === 'user')?.content || '';
+  ok('说话人被解析成姓名', firstUserMsg.includes('爱丽丝'), firstUserMsg.split('\n')[0].slice(0, 60));
+  ok('同时保留 open_id（可追溯）', firstUserMsg.includes('ou_alice'));
+  ok('姓名进了缓存', channel.state.users.ou_alice === '爱丽丝', JSON.stringify(channel.state.users));
+  const memberCalls = cliCalls.filter((c) => c.includes('+chat-members-list') && c.includes('oc_group_1')).length;
+  ok('同群成员列表只拉一次', memberCalls === 1, `${memberCalls} 次`);
+
+  // 会话上记录真实生效的模型
+  ok('会话记录本轮真实模型', sessNow.provider === 'custom' && sessNow.model === 'fake-1', `${sessNow.provider} · ${sessNow.model}`);
 }
 
 // ================= 2b. 零配置：自动学机器人 open_id =================
@@ -248,6 +273,24 @@ section('[3] 跨群信息聚合');
 
   const readRes = await tools.execute('session_read', { session: aSess.id, limit: 4 }, { session: aSess, store, memory, config: testConfig });
   ok('session_read 能读另一个群的对话', readRes.ok && readRes.content.includes('oc_group_1') === false && readRes.content.length > 20, readRes.content.split('\n')[0].slice(0, 60));
+}
+
+// ================= 3b. 模拟入站消息（不打扰真群） =================
+section('[3b] 模拟入站消息');
+{
+  replies.length = 0;
+  const r = await channel.simulate({
+    chatId: 'oc_sim_group',
+    senderId: 'ou_carol',
+    senderName: '卡罗尔',
+    content: '@小助手 你在吗',
+  });
+  ok('simulate 能跑完整一轮', r.ok && typeof r.answer === 'string' && r.answer.length > 0, (r.answer || '').slice(0, 40).replace(/\n/g, ' '));
+  ok('simulate 不会真的往飞书发消息', replies.length === 0 && r.replies.length === 1, `真实回复 ${replies.length} 次 / 模拟 ${r.replies.length} 条`);
+  ok('simulate 的会话照常落盘', Boolean(r.sessionId) && Boolean(store.get(r.sessionId)));
+  const simSess = store.get(r.sessionId);
+  ok('simulate 也带上说话人姓名', (simSess.messages[0]?.content || '').includes('卡罗尔'), (simSess.messages[0]?.content || '').split('\n')[0]);
+  ok('不存在的会话不会误报', (await channel.simulate({ chatId: 'oc_empty', content: '' })).ok === true); // 空文本走提示分支
 }
 
 // ================= 4. 回复内容与分片 =================

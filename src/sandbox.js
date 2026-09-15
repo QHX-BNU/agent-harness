@@ -86,6 +86,18 @@ const looksLikePath = (t) =>
   /^[a-zA-Z]:[\\/]/.test(t) ||
   /^[a-zA-Z]:$/.test(t);
 
+// Windows 控制台默认是本地代码页（中文机器上是 GBK），直接跑命令中文会变成乱码。
+// 统一让子进程按 UTF-8 输出，解码侧就永远是 UTF-8。
+export function utf8Prelude(command) {
+  return (
+    '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ' +
+    '$OutputEncoding=[System.Text.Encoding]::UTF8; ' +
+    // 让原生命令（node/git/dir 之类）也按 UTF-8 输出；写成这样是为了让 PowerShell 正确解析重定向
+    'chcp 65001 > $null; ' +
+    command
+  );
+}
+
 export function createSandbox({
   scope = 'workspace',
   customRoots = [],
@@ -274,7 +286,7 @@ export function createSandbox({
     return isWin
       ? {
           file: 'powershell.exe',
-          args: ['-NoProfile', '-NonInteractive', '-Command', command],
+          args: ['-NoProfile', '-NonInteractive', '-Command', utf8Prelude(command)],
           cwd: cwdAbs,
           env: cleanEnv(),
           backend: 'local',

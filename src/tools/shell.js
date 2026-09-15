@@ -3,8 +3,23 @@
 import { spawn } from 'node:child_process';
 import { config } from '../config.js';
 import { safeResolve, rootOf } from './fs.js';
+import { utf8Prelude } from '../sandbox.js';
 
 const isWin = process.platform === 'win32';
+
+/**
+ * 解码子进程输出：优先 UTF-8；出现替换字符说明其实是本地代码页（中文 Windows = GBK），再退回 GBK。
+ * Node 官方构建带 full-icu，所以 TextDecoder('gbk') 可用。
+ */
+function decodeChunk(buf) {
+  const asUtf8 = buf.toString('utf8');
+  if (!asUtf8.includes('\uFFFD')) return asUtf8;
+  try {
+    return new TextDecoder('gbk').decode(buf);
+  } catch {
+    return asUtf8;
+  }
+}
 
 export const runShell = {
   name: 'run_shell',
@@ -39,7 +54,7 @@ export const runShell = {
       : isWin
         ? {
             file: 'powershell.exe',
-            args: ['-NoProfile', '-NonInteractive', '-Command', command],
+            args: ['-NoProfile', '-NonInteractive', '-Command', utf8Prelude(command)],
             cwd,
             env: process.env,
             backend: 'none',
@@ -64,10 +79,10 @@ export const runShell = {
       let stderr = '';
       const cap = 200_000;
       child.stdout.on('data', (d) => {
-        if (stdout.length < cap) stdout += d.toString();
+        if (stdout.length < cap) stdout += decodeChunk(d);
       });
       child.stderr.on('data', (d) => {
-        if (stderr.length < cap) stderr += d.toString();
+        if (stderr.length < cap) stderr += decodeChunk(d);
       });
 
       const timer = setTimeout(() => {

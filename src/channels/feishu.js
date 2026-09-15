@@ -56,7 +56,7 @@ export function createFeishuChannel({
   providerFactory = createProvider,
 }) {
   const cfg = config.feishu || {};
-  const state = { sessions: {}, dedupe: [], chats: {}, botOpenId: null };
+  const state = { sessions: {}, dedupe: [], chats: {}, users: {}, members: {}, botOpenId: null };
   if (stateFile && fs.existsSync(stateFile)) {
     try {
       Object.assign(state, JSON.parse(fs.readFileSync(stateFile, 'utf8')));
@@ -95,6 +95,9 @@ export function createFeishuChannel({
 
   const sessionKey = (ev) => `${ev.chat_id}:${ev.thread_id || ev.root_id || 'main'}`;
 
+  /** 统一的 lark-cli 参数前缀：profile（可选）+ 自定义入口 */
+  const cliBase = () => [...(cfg.cliPrefix || []), ...(cfg.profile ? ['--profile', cfg.profile] : [])];
+
   /** 这条消息是不是「对我们说的」 */
   function isAddressed(ev) {
     if (ev.chat_type === 'p2p') return true; // 私聊一定是
@@ -123,6 +126,47 @@ export function createFeishuChannel({
     }
   }
 
+  /**
+   * 说话人姓名：事件里只有 open_id（飞书不给名字），
+   * 所以按群拉一次成员列表（id→名字），缓存 6 小时。
+   * bot 身份没有通讯录权限，这里优先用 user 身份，失败就退回 id。
+   */
+  async function resolveMembers(chatId) {
+    const cached = state.members[chatId];
+    if (cached && Date.now() - (cached.at || 0) < 6 * 3600e3) return cached.map || {};
+    const map = { ...(cached?.map || {}) };
+    for (const identity of ['user', 'bot']) {
+      const r = await runCli([...cliBase(), 'im', '+chat-members-list', '--chat-id', chatId, '--as', identity], { timeoutMs: 8000 });
+      if (!r.ok) continue;
+      try {
+        const json = r.out.slice(r.out.indexOf('{'));
+        const j = JSON.parse(json);
+        for (const u of j?.data?.users || []) {
+          if (u.member_id && u.name) map[u.member_id] = u.name;
+        }
+        if (Object.keys(map).length) break;
+      } catch {
+        /* 解析失败就换下一个身份 */
+      }
+    }
+    state.members[chatId] = { at: Date.now(), map };
+    persist();
+    return map;
+  }
+
+  /** 给某个 open_id 找名字（找不到就返回 null，调用方退回 id） */
+  async function resolveName(chatId, openId) {
+    if (!openId) return null;
+    if (state.users[openId]) return state.users[openId];
+    const map = await resolveMembers(chatId);
+    const name = map[openId] || null;
+    if (name) {
+      state.users[openId] = name;
+      persist();
+    }
+    return name;
+  }
+
   /** 群名：只查一次，之后缓存；顺带把会话标题从占位改成真名 */
   async function ensureChatName(chatId) {
     const cur = state.chats[chatId] || {};
@@ -130,7 +174,7 @@ export function createFeishuChannel({
     if (cur.nameTried) return null;
     state.chats[chatId] = { ...cur, nameTried: true, lastAt: Date.now() };
     persist();
-    const r = await runCli([...(cfg.cliPrefix || []), 'im', 'chats', 'get', '--chat-id', chatId, '--as', 'bot'], { timeoutMs: 5000 });
+    const r = await runCli([...cliBase(), 'im', 'chats', 'get', '--chat-id', chatId, '--as', 'bot'], { timeoutMs: 5000 });
     if (!r.ok) return null;
     try {
       const j = JSON.parse(r.out);
@@ -186,7 +230,7 @@ export function createFeishuChannel({
   /** 交给模型看的输入：带上来源，让它可以跨群聚合时区分谁说的 */
   function decoratePrompt(ev, text, session) {
     const chat = state.chats[ev.chat_id] || {};
-    const who = ev.sender_name || ev.sender_id;
+    const who = state.users[ev.sender_id] || ev.sender_name || ev.sender_id;
     const where = ev.chat_type === 'p2p' ? '飞书私聊' : `飞书群「${chat.name || String(ev.chat_id).slice(-6)}」`;
     return `[${where} · ${who}(${ev.sender_id})]\n${text}`;
   }
@@ -225,7 +269,7 @@ export function createFeishuChannel({
     const sent = [];
     for (const [i, part] of parts.entries()) {
       const body = parts.length > 1 ? `（${i + 1}/${parts.length}）\n${part}` : part;
-      const args = [...(cfg.cliPrefix || []), 'im', '+messages-reply', '--message-id', messageId, '--markdown', body, '--as', 'bot'];
+      const args = [...cliBase(), 'im', '+messages-reply', '--message-id', messageId, '--markdown', body, '--as', 'bot'];
       if (inThread) args.push('--reply-in-thread');
       const r = await runCli(args);
       if (!r.ok) {
@@ -233,7 +277,7 @@ export function createFeishuChannel({
         status.lastError = truncate(r.err || `exit ${r.code}`, 300);
         log(`[feishu] 回复失败: ${status.lastError}`);
         // markdown 失败时退化成纯文本再试一次
-        const fb = await runCli([...(cfg.cliPrefix || []), 'im', '+messages-reply', '--message-id', messageId, '--text', body, '--as', 'bot']);
+        const fb = await runCli([...cliBase(), 'im', '+messages-reply', '--message-id', messageId, '--text', body, '--as', 'bot']);
         if (!fb.ok) return sent;
       }
       sent.push(body);
@@ -243,7 +287,13 @@ export function createFeishuChannel({
   }
 
   // ---------- 处理一条消息 ----------
-  async function handleEvent(ev) {
+  /**
+   * @param ev 飞书事件（扁平结构）
+   * @param opts.dryRun 只跑内核、不真的往飞书回消息（给自己做跨群/联调测试用）
+   */
+  async function handleEvent(ev, opts = {}) {
+    const simulated = [];
+    const sendReply = opts.dryRun ? async (id, text) => (simulated.push(text), [text]) : reply;
     if (!ev || ev.type !== 'im.message.receive_v1') return { ok: false, reason: 'not_message' };
     status.lastMessageAt = Date.now();
     if (ev.sender_type === 'bot') {
@@ -266,9 +316,13 @@ export function createFeishuChannel({
     state.dedupe = [...state.dedupe, ev.message_id].slice(-500);
     persist();
     learnBotOpenId(ev);
-    if (ev.chat_type === 'group') await ensureChatName(ev.chat_id).catch(() => {});
+    if (ev.chat_type === 'group') {
+      await ensureChatName(ev.chat_id).catch(() => {});
+      // 事件里只有 open_id，这里补上说话人姓名（按群缓存，一次调用覆盖全群）
+      await resolveName(ev.chat_id, ev.sender_id).catch(() => {});
+    }
     if (!text) {
-      await reply(ev.message_id, '我在，直接说需求就行（例如：@我 看一下 xxx 目录为什么构建失败）');
+      await sendReply(ev.message_id, '我在，直接说需求就行（例如：@我 看一下 xxx 目录为什么构建失败）');
       return { ok: true, reason: 'empty_text' };
     }
 
@@ -282,7 +336,9 @@ export function createFeishuChannel({
         '你正在飞书里为团队提供服务：用户在群聊或私聊里 @ 你，你用工具帮他干活，结论会回复到原消息。',
         '- 回答要能直接贴进聊天窗口：先给结论，再给必要细节；不要长篇大论，不要复述工具输出。',
         '- 你看不到聊天记录以外的群消息。需要背景时，用 memory_search / session_list 查这个工作区里沉淀的信息。',
-        '- 群里沉淀下来的、以后还用得上的事实（约定、结论、负责人、进度），用 memory_add 写进 workspace 级记忆，这样别的群也能召回。',
+        '- 群里沉淀下来的、以后还用得上的事实（约定、结论、负责人、进度），用 memory_add 时**显式传 scope="workspace"**，' +
+          '这样别的群、别的会话也能召回；只跟当前话题有关的临时信息才用默认的 session。',
+        '- 所有群共用同一个工作区，所以别的群里记下的事实你也能查到；引用时说明来源群，别把 A 群的结论按到 B 群头上。',
       ].join('\n'),
     };
 
@@ -296,6 +352,12 @@ export function createFeishuChannel({
       timeoutMs: config.modelTimeoutMs,
       retries: config.modelRetries,
     });
+    // 会话上记录本轮真正用的模型（否则界面上显示的是创建时的默认值，会误导）
+    if (session.provider !== provider.id || session.model !== provider.model) {
+      session.provider = provider.id;
+      session.model = provider.model;
+      store.save(session);
+    }
 
     let answer = '';
     const emit = (e) => {
@@ -305,9 +367,12 @@ export function createFeishuChannel({
       onEvent?.(e, session, ev);
     };
 
-    const slowTimer = setTimeout(() => {
-      reply(ev.message_id, '任务还在跑，我处理完会把结论发上来…').catch(() => {});
-    }, cfg.progressAfterMs ?? 15000);
+    const slowTimer = setTimeout(
+      () => {
+        sendReply(ev.message_id, '任务还在跑，我处理完会把结论发上来…').catch(() => {});
+      },
+      opts.dryRun ? 3600000 : cfg.progressAfterMs ?? 15000,
+    );
 
     try {
       const result = await runTurn({
@@ -340,15 +405,37 @@ export function createFeishuChannel({
       clearTimeout(slowTimer);
       status.handled++;
       const body = answer || (result.reason === 'max_steps' ? '任务超过步数上限被中止了，说个更具体的目标我再试。' : '（没有产出内容）');
-      await reply(ev.message_id, body);
-      return { ok: true, sessionId: session.id, answer: body };
+      await sendReply(ev.message_id, body);
+      return { ok: true, sessionId: session.id, answer: body, replies: simulated };
     } catch (err) {
       clearTimeout(slowTimer);
       status.errors++;
       status.lastError = truncate(err.message, 300);
-      await reply(ev.message_id, `出错了：${err.message}`);
-      return { ok: false, reason: 'error', error: err.message };
+      await sendReply(ev.message_id, `出错了：${err.message}`);
+      return { ok: false, reason: 'error', error: err.message, replies: simulated };
     }
+  }
+
+  /**
+   * 模拟一条入站消息：只跑内核（真的调模型、真的写文件/记忆），但不会往飞书发消息。
+   * 用来验证「换个群还能不能共享信息」这类行为，不用去真群里刷屏。
+   */
+  async function simulate({ chatId, chatType = 'group', senderId = 'ou_simulated_user', senderName, content, mentions }) {
+    const ev = {
+      type: 'im.message.receive_v1',
+      message_id: `om_sim_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      chat_id: chatId,
+      chat_type: chatType,
+      message_type: 'text',
+      sender_type: 'user',
+      sender_id: senderId,
+      sender_name: senderName,
+      content,
+      mentions: mentions || [{ id: cfg.botOpenId || state.botOpenId, key: '@_user_1', name: cfg.botName }],
+      create_time: String(Date.now()),
+    };
+    if (senderName) state.users[senderId] = senderName;
+    return handleEvent(ev, { dryRun: true });
   }
 
   let onEvent = null;
@@ -358,7 +445,7 @@ export function createFeishuChannel({
     if (child) return status;
     stopping = false;
     const args = [
-      ...(cfg.cliPrefix || []),
+      ...cliBase(),
       'event',
       'consume',
       cfg.eventKey || 'im.message.receive_v1',
@@ -460,8 +547,41 @@ export function createFeishuChannel({
     start,
     stop,
     handleEvent,
+    simulate,
     reply,
     status: () => ({ ...status, sessions: Object.keys(state.sessions).length, chats: Object.keys(state.chats).length, stateFile }),
+    /** 当前生效的通道配置（给接口/界面看） */
+    describe: () => ({
+      botName: cfg.botName || '',
+      botAliases: cfg.botAliases || [],
+      botOpenId: cfg.botOpenId || state.botOpenId || '',
+      requireMention: cfg.requireMention !== false,
+      replyInThread: cfg.replyInThread !== false,
+      workspaceId: cfg.workspaceId || 'default',
+      approvalMode: cfg.approvalMode || 'auto',
+      profile: cfg.profile || '',
+      eventKey: cfg.eventKey || 'im.message.receive_v1',
+    }),
+    /**
+     * 热更新通道配置：不用重启服务就能换机器人 / 换工作区（重启会丢掉同步过来的模型 key）
+     */
+    configure(patch = {}) {
+      if (patch.botName !== undefined) cfg.botName = String(patch.botName).trim();
+      if (patch.botAliases !== undefined) cfg.botAliases = patch.botAliases || [];
+      if (patch.botOpenId !== undefined && patch.botOpenId) {
+        cfg.botOpenId = String(patch.botOpenId).trim();
+        state.botOpenId = cfg.botOpenId;
+      }
+      if (patch.workspaceId !== undefined) cfg.workspaceId = String(patch.workspaceId).trim() || 'default';
+      if (patch.requireMention !== undefined) cfg.requireMention = Boolean(patch.requireMention);
+      if (patch.replyInThread !== undefined) cfg.replyInThread = Boolean(patch.replyInThread);
+      if (patch.approvalMode !== undefined) cfg.approvalMode = String(patch.approvalMode);
+      if (patch.profile !== undefined) cfg.profile = String(patch.profile).trim();
+      if (patch.workspaceByChat !== undefined) cfg.workspaceByChat = patch.workspaceByChat || {};
+      persist();
+      log(`[feishu] 配置已更新：机器人=${cfg.botName || '(未设)'} · 工作区=${cfg.workspaceId} · 需要@=${cfg.requireMention !== false}`);
+      return { ...status, config: undefined };
+    },
     /** 记录群名，让日志与 prompt 更可读 */
     noteChat(chatId, name) {
       state.chats[chatId] = { ...(state.chats[chatId] || {}), name, lastAt: Date.now() };

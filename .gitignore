@@ -3,8 +3,16 @@
 .sessions-test/
 .artifacts/
 .artifacts-test/
+.channels/
 .memory/
 .sandbox-tmp/
+.workspaces.json
+
+# 密钥：绝不入库
+.lark-app-secret
+.runtime-model.json
+.env
+.env.local
 
 # 测试产物
 e2e/

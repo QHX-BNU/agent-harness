@@ -70,6 +70,8 @@ export const config = {
     // 启动 lark-cli 的方式：默认用 node 直接跑它的入口（Windows 上是 .cmd shim，直接 spawn 会失败）
     cliCommand: env.FEISHU_CLI_COMMAND || process.execPath,
     cliPrefix: env.FEISHU_CLI_ENTRY ? [path.resolve(env.FEISHU_CLI_ENTRY)] : [LARK_CLI_ENTRY],
+    // lark-cli 的 profile：用独立 profile 绑机器人应用，就不会动到默认 profile（用户身份那套）
+    profile: env.FEISHU_CLI_PROFILE || '',
     eventKey: env.FEISHU_EVENT_KEY || 'im.message.receive_v1',
     // 机器人自己的名字/open_id：用来判断有没有被 @
     botName: env.FEISHU_BOT_NAME || '',

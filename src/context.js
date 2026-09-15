@@ -3,16 +3,15 @@
 import { config } from './config.js';
 
 export function buildSystemPrompt({ workspace, workspaceName = '', tools, approvalMode, model, memoryText = '', todos = [], skills = [], channelPrompt = '' }) {
+  // 工具清单只列名字：完整 schema 已经在 API 的 tools 参数里给过一次了，
+  // 这里再抄一遍描述纯属浪费 token（每轮都要付一次）。
   const byCat = tools.reduce((acc, t) => {
-    (acc[t.category || 'other'] = acc[t.category || 'other'] || []).push(t);
+    const cat = t.category || 'other';
+    (acc[cat] = acc[cat] || []).push(t.readOnly ? `${t.name}(只读)` : t.name);
     return acc;
   }, {});
   const toolList = Object.entries(byCat)
-    .map(
-      ([cat, list]) =>
-        `### ${cat}\n` +
-        list.map((t) => `- ${t.name}${t.readOnly ? ' (只读)' : ''}: ${t.description}`).join('\n'),
-    )
+    .map(([cat, names]) => `- ${cat}: ${names.join(', ')}`)
     .join('\n');
 
   const sections = [
@@ -24,7 +23,7 @@ export function buildSystemPrompt({ workspace, workspaceName = '', tools, approv
 - 审批策略: ${approvalMode}（写文件 / 执行命令可能需要用户确认）
 - 当前时间: ${new Date().toISOString()}`,
 
-    `## 可用工具
+    `## 可用工具（参数以工具定义为准）
 ${toolList}`,
   ];
 

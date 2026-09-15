@@ -188,7 +188,9 @@ section('[5] 上下文组装');
   });
   ok('系统提示包含记忆段', prompt.includes('相关长期记忆') && prompt.includes('#1'));
   ok('系统提示包含任务清单', prompt.includes('当前任务清单') && prompt.includes('写测试'));
-  ok('系统提示按类别列工具', prompt.includes('### fs') && prompt.includes('### memory'));
+  ok('系统提示按类别列工具', prompt.includes('- fs: ') && prompt.includes('- memory: '));
+  ok('系统提示不重复工具描述（省 token）', !prompt.includes(tools.enabled[0].description.slice(0, 20)));
+  ok('系统提示保持精简（<1200 字符）', prompt.length < 1200, `${prompt.length} 字符`);
 
   const long = [];
   for (let i = 0; i < 40; i++) {
