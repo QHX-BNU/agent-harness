@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { ensureDir } from './fsutil.js';
 
 export const DEFAULT_WORKSPACE_ID = 'default';
 
@@ -26,7 +27,7 @@ export class WorkspaceStore {
   }
 
   #persist() {
-    fs.mkdirSync(path.dirname(this.file), { recursive: true });
+    ensureDir(path.dirname(this.file));
     fs.writeFileSync(this.file, JSON.stringify({ version: 1, workspaces: this.items }, null, 2), 'utf8');
   }
 

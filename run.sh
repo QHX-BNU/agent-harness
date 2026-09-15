@@ -13,9 +13,22 @@ set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 BUN="$HERE/runtime/bin/bun"
 
+# 参数：--jail（真沙箱）/ --allow-shell（jail 但保留 shell）/ 工作区路径
+USE_JAIL=0
+ALLOW_SHELL=0
+WORKSPACE_ARG=""
+for a in "$@"; do
+  case "$a" in
+    --jail) USE_JAIL=1 ;;
+    --allow-shell) ALLOW_SHELL=1 ;;
+    -*) ;;
+    *) [ -z "$WORKSPACE_ARG" ] && WORKSPACE_ARG="$a" ;;
+  esac
+done
+
 # 第一个参数当工作区目录；不传就用当前目录
-if [ -n "$1" ]; then
-  WORKSPACE=$(cd "$1" && pwd)
+if [ -n "$WORKSPACE_ARG" ]; then
+  WORKSPACE=$(cd "$WORKSPACE_ARG" && pwd)
 else
   WORKSPACE=$(pwd)
 fi
@@ -24,6 +37,21 @@ echo "[workspace] $WORKSPACE"
 
 # 会话/记忆/产物都放项目目录下（配置里是相对路径，所以要在项目根目录执行）
 cd "$HERE"
+
+# ---- 真沙箱模式 ----
+# 必须用 Node 启动：权限模型是 Node 的能力，Bun 不支持（用它等于假装开了沙箱）
+if [ "$USE_JAIL" = "1" ]; then
+  if ! command -v node >/dev/null 2>&1; then
+    echo "[!] 真沙箱需要 Node（Node 的 --permission 权限模型），当前机器上没有找到。"
+    echo "    装一个 Node（>=20）后再跑 ./run.sh --jail；"
+    echo "    或者按普通模式启动，并在设置里把「执行后端」换成 Docker / WSL。"
+    exit 1
+  fi
+  echo "[runtime] 真沙箱模式（Node 权限模型）· $(command -v node)"
+  set -- "$HERE/scripts/jail.js" --workspace "$WORKSPACE"
+  [ "$ALLOW_SHELL" = "1" ] && set -- "$@" --allow-shell
+  exec node "$@"
+fi
 
 if [ -x "$BUN" ]; then
   echo "[runtime] 用项目自带的 Bun"

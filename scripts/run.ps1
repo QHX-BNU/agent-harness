@@ -5,14 +5,29 @@
 #   2. 系统里的 node                    ← 已经装了 Node 就用它，零下载
 #   3. 系统里的 bun
 #   4. 都没有 → 下载一次 Bun 到项目里（约 38MB，之后不再下载）
+#
+# --jail：改用真沙箱启动（Node 权限模型），agent 的文件操作被运行时关在工作区内，
+#         代价是 shell 工具被禁用；加 --allow-shell 可以保留 shell，但隔离会降级。
 param(
-  [string]$Workspace = ""
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]]$Args
 )
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $PSScriptRoot          # 项目根目录
 $bun = Join-Path $here 'runtime\bin\bun.exe'
 $server = Join-Path $here 'server.js'
+
+# 解析参数：--jail / --allow-shell / 工作区路径
+$useJail = $false
+$allowShell = $false
+$Workspace = ''
+foreach ($a in @($Args)) {
+  if ($a -eq '--jail') { $useJail = $true; continue }
+  if ($a -eq '--allow-shell') { $allowShell = $true; continue }
+  if ($a.StartsWith('-')) { continue }
+  if (-not $Workspace) { $Workspace = $a }
+}
 
 # 工作区：参数 > 环境变量 > 当前目录
 if (-not $Workspace) { $Workspace = if ($env:WORKSPACE) { $env:WORKSPACE } else { (Get-Location).Path } }
@@ -29,6 +44,24 @@ Set-Location $here
 function Start-Harness($exe, $label) {
   Write-Host "[runtime] $label"
   & $exe $server
+  exit $LASTEXITCODE
+}
+
+# ---- 真沙箱模式：交给 jail 启动器（它负责算权限模型的白名单）----
+# 必须用 Node 启动：权限模型是 Node 的能力，Bun 不支持（拿 Bun 启动等于假装开了沙箱）
+if ($useJail) {
+  $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+  if (-not $nodeCmd) {
+    Write-Host '[!] 真沙箱需要 Node（Node 的 --permission 权限模型），当前机器上没有找到。'
+    Write-Host '    装一个 Node（≥20，https://nodejs.org）后再跑 run.cmd --jail；'
+    Write-Host '    或者按普通模式启动，并在设置里把「执行后端」换成 Docker / WSL。'
+    exit 1
+  }
+  $jail = Join-Path $PSScriptRoot 'jail.js'
+  $jailArgs = @($jail, '--workspace', $env:WORKSPACE)
+  if ($allowShell) { $jailArgs += '--allow-shell' }
+  Write-Host "[runtime] 真沙箱模式（Node 权限模型）· $($nodeCmd.Source)"
+  & $nodeCmd.Source @jailArgs
   exit $LASTEXITCODE
 }
 

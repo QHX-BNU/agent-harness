@@ -42,10 +42,12 @@ export const runShell = {
       ? sandbox.resolve(workdir, { tool: 'run_shell' })
       : safeResolve(workdir, rootOf(ctx));
 
-    // 2) 命令扫描：拦住「用命令绕出作用区域」
+    // 2) 命令扫描：拦住「用命令绕出作用区域」，以及网络策略不允许的联网命令
     if (sandbox) {
       const check = sandbox.checkCommand(command, { cwd, tool: 'run_shell' });
       if (!check.ok) return `沙箱拒绝执行：${check.reason}`;
+      // 网络策略要走本地代理，等它绑定端口（非 all 模式才有）
+      await sandbox.ready?.();
     }
 
     // 3) 构造真正要跑的东西（本地 / docker / wsl），并带上清洗过的环境变量
@@ -72,6 +74,14 @@ export const runShell = {
           stdio: ['ignore', 'pipe', 'pipe'],
         });
       } catch (err) {
+        // Node 权限模型（真隔离模式）会直接拒绝派生进程
+        if (err.code === 'ERR_ACCESS_DENIED') {
+          return resolve(
+            '沙箱拒绝执行：当前运行在真隔离模式（Node 权限模型），**不允许派生进程**，shell 工具被运行时禁用。\n' +
+              '  要跑命令：用 --allow-shell 启动 jail（注意子进程不受权限模型约束、隔离会降级），' +
+              '或改用 docker / wsl 沙箱后端；文件读写仍然受权限模型强制约束。',
+          );
+        }
         return resolve(`命令启动失败：${err.message}`);
       }
 
@@ -92,6 +102,9 @@ export const runShell = {
 
       child.on('error', (err) => {
         clearTimeout(timer);
+        if (err.code === 'ERR_ACCESS_DENIED' || /permission/i.test(err.message)) {
+          return resolve('沙箱拒绝执行：真隔离模式（Node 权限模型）不允许派生进程。用 --allow-shell 启动 jail，或改用 docker / wsl 后端。');
+        }
         resolve(`命令启动失败：${err.message}`);
       });
       child.on('close', (code) => {

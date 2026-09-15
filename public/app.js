@@ -36,6 +36,13 @@
     sbScope: $('sbScope'),
     sbRoots: $('sbRoots'),
     sbRootsField: $('sbRootsField'),
+    sbNetwork: $('sbNetwork'),
+    sbNetworkList: $('sbNetworkList'),
+    sbNetworkListField: $('sbNetworkListField'),
+    sbNetProbeInput: $('sbNetProbeInput'),
+    sbNetProbe: $('sbNetProbe'),
+    sbNetProbeResult: $('sbNetProbeResult'),
+    sbIsolation: $('sbIsolation'),
     sbMode: $('sbMode'),
     sbBackend: $('sbBackend'),
     sbStrict: $('sbStrict'),
@@ -53,7 +60,7 @@
     approvalMode: 'ask',
     topK: 5,
     profiles: {},
-    sandbox: { scope: 'workspace', customRoots: [], mode: 'write', backend: 'local', strict: true },
+    sandbox: { scope: 'workspace', customRoots: [], mode: 'write', backend: 'local', strict: true, network: 'all', networkList: [] },
   };
 
   const state = {
@@ -388,6 +395,28 @@
     els.sbBackend.value = cat.backends.find((b) => b.id === (sb.backend || 'local') && b.available)?.id || 'local';
     els.sbRoots.value = (sb.customRoots || []).join('\n');
     els.sbStrict.checked = sb.strict !== false;
+
+    // 网络访问：模式 + 主机列表
+    els.sbNetwork.innerHTML = '';
+    for (const m of cat.networkModes || []) {
+      const o = el('option', null, m.label);
+      o.value = m.id;
+      o.title = m.description;
+      els.sbNetwork.append(o);
+    }
+    els.sbNetwork.value = sb.network || 'all';
+    els.sbNetworkList.value = (sb.networkList || []).join('\n');
+    els.sbNetworkListField.hidden = !['whitelist', 'blacklist'].includes(els.sbNetwork.value);
+
+    // 隔离等级徽标：让「不是真沙箱」这件事显眼
+    const iso = cat.isolation;
+    if (iso) {
+      els.sbIsolation.className = `isolation-badge level-${iso.level}`;
+      const icon = { container: '🛡', runtime: '🔒', policy: '⚠' }[iso.level] || '•';
+      els.sbIsolation.textContent = `${icon} 隔离等级：${iso.label}`;
+      els.sbIsolation.title = iso.detail;
+    }
+
     els.sbRootsField.hidden = els.sbScope.value !== 'custom';
     renderSandboxPreview();
   }
@@ -398,11 +427,48 @@
       mode: els.sbMode.value,
       backend: els.sbBackend.value,
       strict: els.sbStrict.checked,
+      network: els.sbNetwork.value,
+      networkList: els.sbNetworkList.value
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean),
       customRoots: els.sbRoots.value
         .split(/\n+/)
         .map((s) => s.trim())
         .filter(Boolean),
     };
+  }
+
+  /** 用当前表单的规则试一个主机名（不发出任何真实请求） */
+  function probeNetwork() {
+    const host = els.sbNetProbeInput.value.trim();
+    const out = els.sbNetProbeResult;
+    if (!host) {
+      out.textContent = '先填个主机名';
+      return;
+    }
+    const sb = readSandboxForm();
+    // 本地按同一套规则算一遍，避免为了试规则再起一个沙箱
+    const rules = sb.networkList.map((r) => r.toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/\/.*$/, ''));
+    const bare = host.toLowerCase().replace(/^[a-z]+:\/\//, '').split('/')[0];
+    const [h, port] = bare.split(':');
+    const hit = rules.some((r) => {
+      const [rh, rp] = r.split(':');
+      if (rp && port && rp !== port) return false;
+      if (rh === '*') return true;
+      if (rh.startsWith('*')) return h === rh.replace(/^\*\.?/, '') || h.endsWith(`.${rh.replace(/^\*\.?/, '')}`);
+      return h === rh;
+    });
+    const verdict =
+      sb.network === 'all'
+        ? { ok: true, why: '全部放行' }
+        : sb.network === 'off'
+          ? { ok: false, why: '完全禁网' }
+          : sb.network === 'whitelist'
+            ? { ok: hit, why: hit ? '在白名单里' : '不在白名单里' }
+            : { ok: !hit, why: hit ? '在黑名单里' : '不在黑名单里' };
+    out.style.color = verdict.ok ? 'var(--ok)' : 'var(--err)';
+    out.textContent = `${verdict.ok ? '✓ 允许' : '✗ 拒绝'} · ${verdict.why}`;
   }
 
   function renderSandboxPreview(applied = null) {
@@ -412,10 +478,18 @@
     const modeLabel = cat?.modes.find((m) => m.id === cfg.mode)?.label || cfg.mode;
     const roots = applied?.roots || cfg.customRoots || [];
     const rootLine = cfg.scope === 'workspace' ? (cat?.workspace || '工作区') : cfg.scope === 'home' ? cat?.home || '~' : roots.join(' · ') || '（未指定）';
+    const netMode = cfg.network || 'all';
+    const netLabel = cat?.networkModes?.find((m) => m.id === netMode)?.label || netMode;
+    const netList = cfg.networkList || [];
     els.sbPreview.innerHTML =
       `<div>作用区域：<b>${esc(scopeLabel)}</b></div>` +
       `<div>实际根目录：${esc(rootLine)}</div>` +
-      `<div>权限：<b>${esc(modeLabel)}</b> · 后端：<b>${esc(cfg.backend || 'local')}</b> · 严格模式：${cfg.strict === false ? '关' : '开'}</div>`;
+      `<div>权限：<b>${esc(modeLabel)}</b> · 后端：<b>${esc(cfg.backend || 'local')}</b> · 严格模式：${cfg.strict === false ? '关' : '开'}</div>` +
+      `<div>网络：<b>${esc(netLabel)}</b>${
+        ['whitelist', 'blacklist'].includes(netMode) && netList.length
+          ? ` · ${esc(netList.slice(0, 3).join(', '))}${netList.length > 3 ? ` 等 ${netList.length} 条` : ''}`
+          : ''
+      }</div>`;
     updateSandboxBadge(applied || cfg);
   }
 
@@ -964,6 +1038,15 @@
   els.sbBackend.onchange = () => renderSandboxPreview(readSandboxForm());
   els.sbStrict.onchange = () => renderSandboxPreview(readSandboxForm());
   els.sbRoots.oninput = () => renderSandboxPreview(readSandboxForm());
+  els.sbNetwork.onchange = () => {
+    els.sbNetworkListField.hidden = !['whitelist', 'blacklist'].includes(els.sbNetwork.value);
+    renderSandboxPreview(readSandboxForm());
+  };
+  els.sbNetworkList.oninput = () => renderSandboxPreview(readSandboxForm());
+  els.sbNetProbe.onclick = probeNetwork;
+  els.sbNetProbeInput.onkeydown = (e) => {
+    if (e.key === 'Enter') probeNetwork();
+  };
   els.sbTest.onclick = testSandbox;
   els.sbBadge.onclick = () => {
     openModal();

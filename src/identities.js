@@ -5,6 +5,7 @@
 // 否则就会出现「消息里显示 ou_xxx 而不是真名」这种问题。
 import fs from 'node:fs';
 import path from 'node:path';
+import { ensureDir } from './fsutil.js';
 
 export const looksLikeId = (s) => /^(ou_|on_|oc_|om_|cli_)/i.test(String(s || ''));
 
@@ -28,7 +29,7 @@ export class IdentityStore {
   #persist() {
     if (!this.file) return;
     try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true });
+      ensureDir(path.dirname(this.file));
       fs.writeFileSync(this.file, JSON.stringify(this.data, null, 2), 'utf8');
     } catch {
       /* 落盘失败不影响主流程 */

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { createState, publicSession } from './state.js';
+import { ensureDir } from './fsutil.js';
 
 export class SessionStore {
   constructor({ dir, artifactsDir, trashDir }) {
@@ -11,9 +12,9 @@ export class SessionStore {
     this.artifactsDir = artifactsDir;
     // 回收站：删除会话时移到这里而不是直接删，误删可恢复
     this.trashDir = trashDir || `${dir}-trash`;
-    fs.mkdirSync(this.dir, { recursive: true });
-    fs.mkdirSync(this.artifactsDir, { recursive: true });
-    fs.mkdirSync(this.trashDir, { recursive: true });
+    ensureDir(this.dir);
+    ensureDir(this.artifactsDir);
+    ensureDir(this.trashDir);
     this.cache = new Map();
   }
 

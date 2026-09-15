@@ -753,6 +753,25 @@ button.link-btn:hover { text-decoration: underline; background: transparent; bor
 }
 .trace-row.nested .trace-badge { color: var(--cyan); border-color: color-mix(in srgb, var(--cyan) 40%, var(--border)); }
 
+/* ============ 隔离等级徽标 ============ */
+.isolation-badge {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 12px; margin-bottom: 10px;
+  border-radius: 10px; font-size: 12.5px; font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.isolation-badge.level-container { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+.isolation-badge.level-runtime { color: var(--cyan); border-color: color-mix(in srgb, var(--cyan) 40%, var(--border)); }
+.isolation-badge.level-policy { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); background: color-mix(in srgb, var(--warn) 8%, var(--surface-2)); }
+
+.divider-label {
+  margin: 14px 0 8px;
+  font-size: 11.5px; font-weight: 600; letter-spacing: .04em;
+  color: var(--dim); text-transform: uppercase;
+  border-top: 1px solid var(--border); padding-top: 10px;
+}
+
 /* ============ 轻提示 ============ */
 .toast {
   position: fixed; left: 50%; bottom: 104px; transform: translateX(-50%);

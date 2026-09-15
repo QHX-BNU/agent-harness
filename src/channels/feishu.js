@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { ensureDir } from '../fsutil.js';
 
 import { runTurn } from '../loop.js';
 import { Policy } from '../policy.js';
@@ -75,7 +76,7 @@ export function createFeishuChannel({
   const persist = () => {
     if (!stateFile) return;
     try {
-      fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+      ensureDir(path.dirname(stateFile));
       fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf8');
     } catch {
       /* 落盘失败不影响主流程 */

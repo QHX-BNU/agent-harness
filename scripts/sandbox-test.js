@@ -118,7 +118,26 @@ section('[5] 执行后端（local / docker / wsl）');
 
   const docker = createSandbox({ scope: 'workspace', workspace: WS, backend: 'docker', image: 'alpine:3' }).buildExec('ls');
   ok('docker 后端构造出挂载参数', docker.file === 'docker' && docker.args.includes('-v') && docker.args.some((a) => a.endsWith(':/work')));
-  ok('docker 后端默认禁网', docker.args.includes('--network') && docker.args.includes('none'));
+  ok(
+    'docker 后端网络跟随策略：all → bridge',
+    (() => {
+      const d = createSandbox({ scope: 'workspace', workspace: WS, backend: 'docker', image: 'alpine:3', network: 'all' }).buildExec('ls');
+      const i = d.args.indexOf('--network');
+      return i >= 0 && d.args[i + 1] === 'bridge';
+    })(),
+  );
+  ok(
+    'docker 后端网络跟随策略：off/白名单/黑名单 → none',
+    ['off', 'whitelist', 'blacklist'].every((mode) => {
+      const d = createSandbox({ scope: 'workspace', workspace: WS, backend: 'docker', image: 'alpine:3', network: mode }).buildExec('ls');
+      const i = d.args.indexOf('--network');
+      return i >= 0 && d.args[i + 1] === 'none';
+    }),
+  );
+  ok('沙箱快照带上网络与隔离等级', (() => {
+    const d = createSandbox({ scope: 'workspace', workspace: WS, network: 'off' }).describe();
+    return d.network === 'off' && d.isolation?.level === 'policy' && Array.isArray(d.networkModes);
+  })());
   ok('docker 后端带镜像', docker.args.includes('alpine:3'));
   const roDocker = createSandbox({ scope: 'workspace', workspace: WS, backend: 'docker', mode: 'readonly' }).buildExec('ls');
   ok('docker 只读时挂载 :ro', roDocker.args.some((a) => a.endsWith(':/work:ro')));

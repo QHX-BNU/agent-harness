@@ -74,8 +74,20 @@ section('[3] 运行顺序与目录约定');
   ok('run.sh 同样给出手动步骤', /releases\/latest/.test(sh));
 }
 
-section('[4] 运行时安装器');
+section('[3b] 真沙箱（--jail）接线');
 {
+  const jail = readText('scripts/jail.js');
+  ok('jail.js 存在且用权限模型启动', /--permission/.test(jail) || /jailFlags/.test(jail), '白名单由 src/isolation.js 计算');
+  ok('jail 必须用 Node 启动（Bun 不支持权限模型）', /findNodeRuntime/.test(jail) && /Bun 不支持/.test(jail));
+  ok('找不到 Node 时明确报错而不是静默降级', /找不到 Node 运行时/.test(jail) && /process\.exit\(2\)/.test(jail));
+  ok('run.ps1 的 --jail 走 Node 而不是自带 Bun', /--jail/.test(ps1) && /Get-Command node/.test(ps1) && /真沙箱需要 Node/.test(ps1));
+  ok('run.sh 的 --jail 同理', /--jail/.test(sh) && /真沙箱需要 Node/.test(sh) && /exec node/.test(sh));
+  ok('会提示白名单外的工作区', /不在本次白名单内/.test(jail));
+  ok('网络策略进沙箱快照', /networkList/.test(readText('src/sandbox.js')) && /networkModes/.test(readText('src/sandbox.js')));
+  ok('隔离等级可自报', /detectRuntimeJail/.test(readText('src/isolation.js')) && /process\.permission/.test(readText('src/isolation.js')));
+}
+
+section('[4] 运行时安装器');{
   const table = ['bun-windows-x64.zip', 'bun-linux-x64.zip', 'bun-darwin-x64.zip'].every((n) => setupJs.includes(n)) && /aarch64/.test(setupJs);
   ok('setup-runtime.js 自带平台资产表（含 arm64）', table);
   ok('会校验 SHA256', /SHASUMS256/.test(setupJs) && /createHash\('sha256'\)/.test(setupJs));

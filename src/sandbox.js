@@ -10,6 +10,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createNetworkPolicy, getNetworkProxy, proxyEnvFor, normalizeMode, NETWORK_MODES } from './network-policy.js';
+import { detectRuntimeJail, isolationSummary } from './isolation.js';
+import { ensureDir } from './fsutil.js';
 
 export class SandboxError extends Error {
   constructor(message, { rule = 'scope', target = '' } = {}) {
@@ -106,13 +109,24 @@ export function createSandbox({
   workspace = process.cwd(),
   strict = true,
   image = 'alpine:3',
-  network = false,
+  network = 'all',
+  networkList = [],
   tempDir = null,
   emit = null,
   sessionId = null,
 } = {}) {
   if (!SCOPE_PRESETS[scope]) throw new SandboxError(`未知作用区域 "${scope}"`, { rule: 'config' });
   if (!MODES[mode]) throw new SandboxError(`未知权限模式 "${mode}"`, { rule: 'config' });
+
+  // 网络策略：all / off / whitelist / blacklist（兼容旧的 network: true/false）
+  const networkPolicy = createNetworkPolicy({ mode: normalizeMode(network, 'all'), list: networkList });
+  // 非 all 模式要起本地代理；创建时就把它拉起来，等它绑定端口（shell 工具执行前会 await ready()）
+  const proxyHandle = networkPolicy.mode === 'all' ? null : getNetworkProxy(networkPolicy, {
+    onDecision: (d) => {
+      if (!d.ok) emit?.({ type: 'network_denied', host: d.host, port: d.port, reason: d.reason });
+    },
+  });
+  const readyPromise = proxyHandle ? proxyHandle.ready : Promise.resolve(null);
 
   const roots = (() => {
     if (scope === 'workspace') return [path.resolve(workspace)];
@@ -201,9 +215,17 @@ export function createSandbox({
       }
     }
 
+    // 网络策略：命令分析层（事前拒绝明显越界的联网命令）
+    const netVerdict = networkPolicy.checkCommand(cmd);
+    if (!netVerdict.ok) {
+      record({ action: 'deny', rule: 'network', target: cmd.slice(0, 200), reason: netVerdict.reason, tool });
+      return { ok: false, reason: netVerdict.reason };
+    }
+    if (netVerdict.warn) record({ action: 'warn', rule: 'network', target: cmd.slice(0, 200), reason: netVerdict.warn, tool });
+
     if (!strict || scope === 'full') {
       record({ action: 'allow', rule: 'scope', target: cmd.slice(0, 200), tool });
-      return { ok: true };
+      return { ok: true, network: netVerdict.targets || [] };
     }
 
     // 把命令切成 token，逐个看有没有越界路径
@@ -245,25 +267,32 @@ export function createSandbox({
     env.USERPROFILE = roots[0];
     env.SANDBOX = scope;
     env.SANDBOX_ROOTS = roots.join(path.delimiter);
+    env.SANDBOX_NETWORK = networkPolicy.mode;
     if (tempDir) {
-      fs.mkdirSync(tempDir, { recursive: true });
+      ensureDir(tempDir);
       env.TEMP = tempDir;
       env.TMP = tempDir;
       env.TMPDIR = tempDir;
     }
-    return { ...env, ...extra };
+    // 网络策略不是 all 时，给子进程注入本地代理：连接建立时按策略放行/拒绝
+    const netEnv = networkPolicy.mode === 'all' ? {} : proxyEnvFor(networkPolicy, proxyHandle);
+    return { ...env, ...netEnv, ...extra };
   }
 
   /** 构造真正要 spawn 的东西 */
   function buildExec(command, { cwd = roots[0], tool = 'run_shell' } = {}) {
     const cwdAbs = resolve(cwd, { tool });
+    const env = cleanEnv();
+    const netFlag = networkPolicy.mode === 'all' ? 'bridge' : 'none';
 
     if (backend === 'docker') {
-      const args = ['run', '--rm', '-i', '--network', network ? 'bridge' : 'none'];
+      // docker 后端能拿到真正的网络隔离：off/白名单/黑名单一律先 --network none
+      // （白名单要走主机代理的话需要 --add-host，见 README 的说明）
+      const args = ['run', '--rm', '-i', '--network', netFlag];
       args.push('-v', mode === 'readonly' ? `${roots[0]}:/work:ro` : `${roots[0]}:/work`, '-w', '/work');
       if (image) args.push(image);
       args.push('sh', '-lc', command);
-      return { file: 'docker', args, cwd: process.cwd(), env: cleanEnv(), backend: 'docker', cwdAbs };
+      return { file: 'docker', args, cwd: process.cwd(), env, backend: 'docker', cwdAbs };
     }
 
     if (backend === 'wsl') {
@@ -272,11 +301,15 @@ export function createSandbox({
         const m = /^([a-zA-Z]):[\\/](.*)$/.exec(path.resolve(p));
         return m ? `/mnt/${m[1].toLowerCase()}/${m[2].replace(/\\/g, '/')}` : path.resolve(p).replace(/\\/g, '/');
       };
+      const envPrefix = Object.entries(env)
+        .filter(([k]) => /^(HTTP|HTTPS|ALL|NO)_PROXY$|_proxy$|^NODE_USE_ENV_PROXY$|^SANDBOX_NETWORK$/.test(k))
+        .map(([k, v]) => `${k}='${v}'`)
+        .join(' ');
       return {
         file: 'wsl.exe',
-        args: ['-e', 'sh', '-lc', `cd '${toWsl(cwdAbs)}' && ${command}`],
+        args: ['-e', 'sh', '-lc', `cd '${toWsl(cwdAbs)}' && ${envPrefix ? `${envPrefix} ` : ''}${command}`],
         cwd: process.cwd(),
-        env: cleanEnv(),
+        env,
         backend: 'wsl',
         cwdAbs,
       };
@@ -288,11 +321,11 @@ export function createSandbox({
           file: 'powershell.exe',
           args: ['-NoProfile', '-NonInteractive', '-Command', utf8Prelude(command)],
           cwd: cwdAbs,
-          env: cleanEnv(),
+          env,
           backend: 'local',
           cwdAbs,
         }
-      : { file: '/bin/sh', args: ['-c', command], cwd: cwdAbs, env: cleanEnv(), backend: 'local', cwdAbs };
+      : { file: '/bin/sh', args: ['-c', command], cwd: cwdAbs, env, backend: 'local', cwdAbs };
   }
 
   return {
@@ -311,6 +344,9 @@ export function createSandbox({
     checkCommand,
     cleanEnv,
     buildExec,
+    network: networkPolicy,
+    /** 等本地代理绑定端口（shell 工具执行前调用） */
+    ready: () => readyPromise,
     /** 给 UI / API 用的快照 */
     describe() {
       return {
@@ -321,7 +357,13 @@ export function createSandbox({
         backend,
         strict,
         image,
-        network,
+        network: networkPolicy.mode,
+        networkLabel: networkPolicy.describe().label,
+        networkList: networkPolicy.rules.map((r) => r.raw),
+        networkModes: Object.entries(NETWORK_MODES).map(([id, m]) => ({ id, ...m })),
+        proxy: proxyHandle ? { active: true, port: proxyHandle.port, stats: { ...proxyHandle.stats } } : { active: false },
+        // 隔离到底是不是真的：container（容器）> runtime（权限模型强制）> policy（仅策略，可绕过）
+        isolation: isolationSummary({ sandbox: { backend }, runtimeJail: detectRuntimeJail() }),
         roots,
         sessionId,
         denials: denials.slice(-20),
@@ -329,7 +371,7 @@ export function createSandbox({
         presets: Object.entries(SCOPE_PRESETS).map(([id, p]) => ({ id, ...p })),
         modes: Object.entries(MODES).map(([id, m]) => ({ id, ...m })),
         backends: [
-          { id: 'local', label: '本地策略沙箱', available: true, note: '路径作用域 + 命令扫描 + 环境变量清洗；不是内核隔离' },
+          { id: 'local', label: '本地策略沙箱', available: true, note: '路径作用域 + 命令扫描 + 环境变量清洗；不是内核隔离，可被绕过' },
           {
             id: 'docker',
             label: 'Docker 容器',
@@ -398,6 +440,8 @@ export function sandboxDefaults(env = process.env) {
     customRoots: (env.SANDBOX_ROOTS || '').split(/[;\n]+/).filter(Boolean),
     strict: env.SANDBOX_STRICT !== '0',
     image: env.SANDBOX_IMAGE || 'alpine:3',
-    network: env.SANDBOX_NETWORK === '1',
+    // all | off | whitelist | blacklist（兼容旧写法 1/0）
+    network: env.SANDBOX_NETWORK || 'all',
+    networkList: (env.SANDBOX_NETWORK_LIST || '').split(/[,;\s\n]+/).filter(Boolean),
   };
 }

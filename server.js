@@ -19,6 +19,8 @@ import { setRuntimeModel, describeRuntimeModel } from './src/runtime-model.js';
 import { IdentityStore } from './src/identities.js';
 import { createProvider, listProviders, resolveProviderConfig } from './src/providers/index.js';
 import { createSandbox, SCOPE_PRESETS, MODES, backendAvailable } from './src/sandbox.js';
+import { isolationSummary } from './src/isolation.js';
+import { NETWORK_MODES } from './src/network-policy.js';
 import { runTurn } from './src/loop.js';
 import { createEmitter } from './src/events.js';
 import { eventsToJsonl, sessionToBundle, sessionToMarkdown, summarizeEvent, groupOf } from './src/trace.js';
@@ -156,6 +158,9 @@ function sandboxCatalog() {
     backends: sandboxAvailability(),
     workspace: config.workspace,
     home: os.homedir(),
+    // 现在到底是不是真沙箱 —— 容器 > 运行时强制 > 仅策略（可绕过）
+    isolation: isolationSummary({ sandbox: { backend: config.sandbox?.backend || 'local' } }),
+    networkModes: Object.entries(NETWORK_MODES).map(([id, m]) => ({ id, ...m })),
   };
 }
 
@@ -174,11 +179,12 @@ function buildSandbox(session, requested = {}, emit = null, workspacePath = null
     strict: merged.strict !== false,
     image: merged.image,
     network: merged.network,
+    networkList: merged.networkList,
     tempDir: path.join(config.sessionsDir, '..', '.sandbox-tmp'),
     sessionId: session.id,
     emit: (ev) => {
       // 拒绝记录挂到会话上，界面和导出都能看到
-      if (ev.type === 'sandbox_denied') {
+      if (ev.type === 'sandbox_denied' || ev.type === 'network_denied') {
         session.sandboxDenials = [...(session.sandboxDenials || []), ev].slice(-50);
       }
       emit?.(ev);
@@ -191,7 +197,8 @@ function buildSandbox(session, requested = {}, emit = null, workspacePath = null
     customRoots: sandbox.roots,
     strict: sandbox.strict,
     image: sandbox.image,
-    network: sandbox.network,
+    network: sandbox.network.mode,
+    networkList: sandbox.network.rules.map((r) => r.raw),
   };
   return sandbox;
 }

@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { ensureDir } from './fsutil.js';
 
 export const CATEGORIES = ['anchor', 'structure', 'knowledge', 'situation', 'self'];
 export const SCOPES = ['global', 'workspace', 'session'];
@@ -38,7 +39,7 @@ export class MemoryStore {
   constructor({ dir, workspaceId = 'default' }) {
     this.file = path.join(dir, 'memory.json');
     this.workspaceId = workspaceId;
-    fs.mkdirSync(dir, { recursive: true });
+    ensureDir(dir);
     this.items = fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, 'utf8')) : [];
     this.loadLog = [];
   }

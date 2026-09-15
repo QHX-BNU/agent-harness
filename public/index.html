@@ -195,9 +195,11 @@
 
             <!-- 沙箱 -->
             <section class="spane" id="sec-sandbox">
+              <div class="isolation-badge" id="sbIsolation"></div>
               <p class="hint">
-                决定 agent 能碰到哪些目录。<b>本地策略沙箱</b>靠路径作用域 + 命令扫描 + 环境变量清洗收口，
-                不是内核隔离；装了 Docker / WSL 可以选真隔离后端。
+                决定 agent 能碰到哪些目录、能访问哪些网站。<b>本地策略沙箱</b>靠路径作用域 + 命令扫描 +
+                环境变量清洗收口，<b>不是内核隔离、可以被绕过</b>；要真隔离用
+                <code class="inline">run.cmd --jail</code>（Node 权限模型，运行时强制）或 Docker / WSL 后端。
               </p>
               <label class="field">
                 <span>作用区域</span>
@@ -219,6 +221,22 @@
                 <input type="checkbox" id="sbStrict" />
                 <span>严格模式：扫描命令里的越界路径</span>
               </label>
+
+              <div class="divider-label">网络访问</div>
+              <label class="field">
+                <span>模式</span>
+                <select id="sbNetwork"></select>
+              </label>
+              <label class="field" id="sbNetworkListField" hidden>
+                <span>主机列表（每行一个，支持 <code class="inline">*.example.com</code> 与 <code class="inline">host:port</code>）</span>
+                <textarea id="sbNetworkList" rows="4" placeholder="api.github.com&#10;*.npmjs.org&#10;localhost:8080"></textarea>
+              </label>
+              <label class="field inline-field">
+                <input id="sbNetProbeInput" placeholder="试一个主机名，如 api.github.com" />
+                <button id="sbNetProbe" class="mini">测一下</button>
+                <span class="hint" id="sbNetProbeResult"></span>
+              </label>
+
               <div class="row">
                 <button id="sbTest" class="mini primary">自测规则</button>
                 <span class="hint" id="sbResult"></span>

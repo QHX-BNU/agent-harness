@@ -1,6 +1,7 @@
 // 文件类工具：读、写、改、找。所有路径都必须在工作区内——这是 harness 的第一道边界。
 import fs from 'node:fs';
 import path from 'node:path';
+import { ensureDir } from '../fsutil.js';
 import { config } from '../config.js';
 
 const SKIP_DIRS = new Set(['node_modules', '.git', '.sessions', '.artifacts', '.memory', 'dist', 'build', '.next']);
@@ -149,7 +150,7 @@ export const writeFile = {
     const abs = resolveInSandbox(p, { ...ctx, tool: 'write_file', forWrite: true });
     const existed = fs.existsSync(abs);
     const before = existed ? fs.statSync(abs).size : 0;
-    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    ensureDir(path.dirname(abs));
     fs.writeFileSync(abs, String(content ?? ''), 'utf8');
     const after = fs.statSync(abs).size;
     return `${existed ? '已覆盖' : '已创建'} ${relOf(abs, root)}：${before} B → ${after} B`;
