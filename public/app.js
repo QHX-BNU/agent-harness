@@ -226,6 +226,7 @@
     if (name === 'memory') window.Panels?.refreshMemory();
     if (name === 'tools') window.Panels?.refreshTools();
     if (name === 'workflows') window.Panels?.refreshWorkflows();
+    if (name === 'trash') window.Panels?.refreshTrash();
     if (name === 'sandbox') applySandboxForm();
   }
 

@@ -121,12 +121,12 @@
       </aside>
     </div>
 
-    <!-- 设置：模型 / 交互 / 任务 / 记忆 / 工具 / 工作流 -->
+    <!-- 设置：模型 / 交互 / 沙箱 / 任务 / 记忆 / 工具 / 工作流 / 回收站 -->
     <div id="settingsModal" class="modal" hidden>
       <div class="modal-card settings">
         <header class="modal-head">
           <strong>设置</strong>
-          <span class="dim" id="settingsHint">模型接入 · 任务 · 记忆 · 工具 · 工作流</span>
+          <span class="dim" id="settingsHint">模型接入 · 任务 · 记忆 · 工具 · 工作流 · 回收站</span>
           <span class="flex-1"></span>
           <button id="closeSettings" class="icon-btn small">✕</button>
         </header>
@@ -140,6 +140,7 @@
             <button class="snav" data-sec="memory">记忆</button>
             <button class="snav" data-sec="tools">工具</button>
             <button class="snav" data-sec="workflows">工作流</button>
+            <button class="snav" data-sec="trash">回收站</button>
           </nav>
 
           <div class="settings-panes">
@@ -268,6 +269,19 @@
               <div class="row"><input id="wfInput" placeholder="工作流输入（如某个目录）" /></div>
               <div id="wfList" class="wf-list"></div>
             </section>
+
+            <!-- 回收站 -->
+            <section class="spane" id="sec-trash">
+              <p class="hint">
+                删掉的会话会先放到回收站（磁盘上的 <code class="inline" id="trashDir">.sessions-trash</code>），
+                不会立刻消失。恢复后连同它的 trace 一起回来。
+              </p>
+              <div class="row">
+                <button id="backupSessions" class="mini primary">备份全部会话</button>
+                <button id="purgeTrash" class="mini">清空回收站</button>
+              </div>
+              <div id="trashList" class="mem-list"></div>
+            </section>
           </div>
         </div>
 
@@ -326,6 +340,11 @@
           </section>
         </div>
       </div>
+    </div>
+
+    <div id="toast" class="toast" hidden>
+      <span id="toastText"></span>
+      <button id="toastAction" class="mini primary" hidden>撤销</button>
     </div>
 
     <script src="/markdown.js"></script>

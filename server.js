@@ -24,7 +24,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 // ---------- 装配 ----------
-const store = new SessionStore({ dir: config.sessionsDir, artifactsDir: config.artifactsDir });
+const store = new SessionStore({
+  dir: config.sessionsDir,
+  artifactsDir: config.artifactsDir,
+  trashDir: config.trashDir,
+});
 const memory = new MemoryStore({ dir: config.memoryDir, workspaceId: config.workspace });
 const broker = new ApprovalBroker(config.approvalTimeoutMs);
 const tools = createToolRegistry();
@@ -410,6 +414,27 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/api/sessions') {
       return json(res, 200, store.list({ includeChildren: url.searchParams.get('children') === '1' }));
     }
+    // 备份：把所有会话（含事件）打包成一个 JSON 下载
+    if (req.method === 'GET' && p === '/api/sessions/export') {
+      const bundle = store.exportAll();
+      return download(res, `harness-sessions-${stamp()}.json`, 'application/json', JSON.stringify(bundle, null, 2));
+    }
+    // 回收站
+    if (req.method === 'GET' && p === '/api/sessions/trash') {
+      return json(res, 200, { items: store.listTrash(), dir: config.trashDir });
+    }
+    if (req.method === 'POST' && seg[1] === 'sessions' && seg[2] === 'trash' && seg[4] === 'restore') {
+      try {
+        const restored = store.restore(decodeURIComponent(seg[3]));
+        return json(res, 200, { ok: true, id: restored?.id, title: restored?.title });
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (req.method === 'DELETE' && seg[1] === 'sessions' && seg[2] === 'trash') {
+      const n = store.purge(seg[3] ? decodeURIComponent(seg[3]) : undefined);
+      return json(res, 200, { ok: true, purged: n });
+    }
     if (req.method === 'POST' && p === '/api/sessions') {
       const body = await readBody(req);
       const s = store.create({
@@ -450,8 +475,10 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'DELETE' && !seg[3]) {
         running.get(id)?.abort();
-        store.remove(id);
-        return json(res, 200, { ok: true });
+        // 默认软删除 → 回收站（可恢复）；?hard=1 才是真删
+        const hard = url.searchParams.get('hard') === '1';
+        const r = store.remove(id, { hard });
+        return json(res, 200, { ok: r.ok, soft: !hard, trashId: r.trashId, trashDir: hard ? null : config.trashDir });
       }
     }
 
@@ -561,6 +588,11 @@ server.listen(config.port, config.host, () => {
   console.log(`  workspace = ${config.workspace}`);
   console.log(`  工具 = ${tools.enabled.length}/${tools.all.length} 启用 · 工作流 = ${workflows.list().length} 个 · 记忆 = ${memory.stats().total} 条`);
   console.log(`  approvalMode = ${config.approvalMode}  maxSteps = ${config.maxSteps}  子代理深度 = ${config.maxAgentDepth}`);
+  // 会话存在磁盘上，重启不会丢；这里把计数和路径打出来，便于确认
+  const sessions = store.list({ includeChildren: true });
+  const trash = store.listTrash();
+  console.log(`  会话 = ${sessions.length} 个（${config.sessionsDir}）· 回收站 = ${trash.length} 个（${config.trashDir}）`);
+  if (sessions.length) console.log(`  最近会话 = ${sessions.slice(0, 3).map((s) => `${s.id}/${s.title || '未命名'}`).join(' · ')}`);
   try {
     const p = createProvider({ provider: config.provider, model: config.model, baseUrl: config.baseUrl, apiKey: config.apiKey });
     console.log(`  默认模型 = ${p.id} · ${p.model}  (${p.protocol}, ${p.baseUrl || 'local'})`);

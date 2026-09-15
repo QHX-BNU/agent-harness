@@ -117,9 +117,48 @@ ok('空消息被拒绝', bad.status === 400);
 const missing = await get('/api/sessions/不存在');
 ok('不存在的会话返回 404', missing.status === 404);
 
-await fetch(`${base}/api/sessions/${sid}`, { method: 'DELETE' });
+// ---- 删除 = 软删除（回收站可恢复），这是为了防止误删丢历史 ----
+const preTrash = await get('/api/sessions/trash');
+const preTrashCount = preTrash.data.items.length;
+
+const delRes = await fetch(`${base}/api/sessions/${sid}`, { method: 'DELETE' });
+const delBody = await delRes.json();
+ok('DELETE 默认软删除并返回 trashId', delBody.ok === true && delBody.soft === true && Boolean(delBody.trashId), delBody.trashId);
+
 const after = await get(`/api/sessions/${sid}`);
-ok('DELETE /api/sessions/:id', after.status === 404);
+ok('软删后主列表查不到', after.status === 404);
+
+const trash = await get('/api/sessions/trash');
+ok('回收站里能查到刚删的会话', trash.data.items.length === preTrashCount + 1 && trash.data.items.some((t) => t.trashId === delBody.trashId));
+ok('回收站条目带标题与消息数', trash.data.items[0].messages >= 0 && Boolean(trash.data.items[0].title));
+ok('回收站暴露磁盘路径', typeof trash.data.dir === 'string' && trash.data.dir.length > 0, trash.data.dir);
+
+const restore = await send(`/api/sessions/trash/${encodeURIComponent(delBody.trashId)}/restore`, null);
+ok('POST 回收站恢复', restore.status === 200 && restore.data.ok === true, restore.data.title);
+const back = await get(`/api/sessions/${sid}`);
+ok('恢复后会话回来了（含消息）', back.status === 200 && back.data.id === sid && back.data.messages.length > 0, `${back.data.messages.length} 条消息`);
+const backTrace = await fetch(`${base}/api/sessions/${sid}/trace?format=jsonl`);
+ok('恢复后 trace 也一起回来', (await backTrace.text()).trim().length > 0);
+
+// 备份：全部会话打包下载
+const backupRes = await fetch(`${base}/api/sessions/export`);
+const backup = await backupRes.json();
+ok('GET /api/sessions/export 全量备份', backupRes.ok && backup.count >= 1 && Array.isArray(backup.sessions), `${backup.count} 个会话`);
+ok('备份里含消息与 trace', backup.sessions[0].messages.length > 0 && Array.isArray(backup.sessions[0].events));
+ok('备份响应是附件下载', /attachment/.test(backupRes.headers.get('content-disposition') || ''), backupRes.headers.get('content-disposition'));
+
+// 彻底删除：先软删，再从回收站清掉
+const del2 = await (await fetch(`${base}/api/sessions/${sid}`, { method: 'DELETE' })).json();
+await fetch(`${base}/api/sessions/trash/${encodeURIComponent(del2.trashId)}`, { method: 'DELETE' });
+const trashAfterPurge = await get('/api/sessions/trash');
+ok('彻底删除回收站条目', !trashAfterPurge.data.items.some((t) => t.trashId === del2.trashId));
+const gone = await get(`/api/sessions/${sid}`);
+ok('彻底删除后不可恢复', gone.status === 404);
+
+// 硬删除参数仍然可用（脚本/CI 用来清理）
+const hardTarget = await send('/api/sessions', { title: '硬删除测试' });
+const hardDel = await (await fetch(`${base}/api/sessions/${hardTarget.data.id}?hard=1`, { method: 'DELETE' })).json();
+ok('?hard=1 直接真删不进回收站', hardDel.soft === false && hardDel.trashId === null);
 
 console.log(`\n${fail === 0 ? '✓' : '✗'} 接口冒烟: ${pass} 通过 / ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

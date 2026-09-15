@@ -43,15 +43,47 @@
       item.title = `${s.id} · ${s.model || ''} · ${s.status}`;
       item.onclick = async (e) => {
         if (e.target.classList.contains('del')) {
-          await api(`/api/sessions/${s.id}`, { method: 'DELETE' });
+          const r = await api(`/api/sessions/${s.id}`, { method: 'DELETE' });
           if (state.sessionId === s.id) window.Chat?.reset();
-          return refreshSessions();
+          refreshSessions();
+          // 软删除：给一次撤销的机会
+          showToast(`「${s.title || s.id}」已移入回收站`, '撤销', async () => {
+            if (r?.trashId) await post(`/api/sessions/trash/${encodeURIComponent(r.trashId)}/restore`);
+            refreshSessions();
+          });
+          return;
         }
         await window.Chat?.loadSession(s.id);
         refreshSessions();
       };
       box.append(item);
     }
+  }
+
+  // ---------- 轻提示（带撤销）----------
+  let toastTimer = null;
+  function showToast(text, actionLabel, onAction) {
+    const box = $('toast');
+    if (!box) return;
+    $('toastText').textContent = text;
+    const act = $('toastAction');
+    if (actionLabel) {
+      act.hidden = false;
+      act.textContent = actionLabel;
+      act.onclick = async () => {
+        box.hidden = true;
+        clearTimeout(toastTimer);
+        await onAction?.();
+      };
+    } else {
+      act.hidden = true;
+    }
+    box.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      box.hidden = true;
+      act.hidden = true;
+    }, 9000);
   }
 
   // ---------- 状态 ----------
@@ -210,6 +242,55 @@
     }
   }
 
+  // ---------- 回收站 ----------
+  async function refreshTrash() {
+    const box = $('trashList');
+    if (!box) return;
+    try {
+      const { items, dir } = await api('/api/sessions/trash');
+      const dirEl = $('trashDir');
+      if (dirEl && dir) dirEl.textContent = dir;
+      box.innerHTML = '';
+      if (!items.length) {
+        box.innerHTML = '<div class="dim">回收站是空的</div>';
+        return;
+      }
+      for (const t of items) {
+        const el2 = document.createElement('div');
+        el2.className = 'mem-item';
+        el2.innerHTML = `<div class="meta"><span></span><span class="actions"></span></div><div class="body"></div>`;
+        el2.querySelector('.meta span').textContent = `${t.id} · 删除于 ${String(t.deletedAt).replace('T', ' ').slice(0, 19)}`;
+        el2.querySelector('.body').textContent = `${t.title} · ${t.messages} 条消息`;
+        const actions = el2.querySelector('.actions');
+        const restore = document.createElement('button');
+        restore.className = 'mini';
+        restore.textContent = '恢复';
+        restore.onclick = async () => {
+          try {
+            await post(`/api/sessions/trash/${encodeURIComponent(t.trashId)}/restore`);
+            showToast(`已恢复「${t.title}」`);
+            refreshTrash();
+            refreshSessions();
+          } catch (err) {
+            showToast(`恢复失败：${err.message}`);
+          }
+        };
+        const purge = document.createElement('button');
+        purge.className = 'mini err';
+        purge.textContent = '彻底删除';
+        purge.style.marginLeft = '6px';
+        purge.onclick = async () => {
+          await api(`/api/sessions/trash/${encodeURIComponent(t.trashId)}`, { method: 'DELETE' });
+          refreshTrash();
+        };
+        actions.append(restore, purge);
+        box.append(el2);
+      }
+    } catch (err) {
+      box.innerHTML = `<div class="dim">读取失败：${err.message}</div>`;
+    }
+  }
+
   async function runWorkflow(name) {
     const input = $('wfInput').value.trim();
     window.Chat?.reset({ keepSession: false });
@@ -268,10 +349,39 @@
       await window.Chat?.newSession();
       refreshSessions();
     };
+    $('backupSessions')?.addEventListener('click', backupAll);
+    $('purgeTrash')?.addEventListener('click', async () => {
+      const { items } = await api('/api/sessions/trash');
+      if (!items.length) return showToast('回收站已经是空的');
+      await api('/api/sessions/trash', { method: 'DELETE' });
+      showToast(`已彻底删除 ${items.length} 个会话`);
+      refreshTrash();
+    });
     refreshSessions();
     refreshMemory();
     refreshTools();
     refreshWorkflows();
+    refreshTrash();
+  }
+
+  /** 备份：把全部会话（含 trace）下载成一个 JSON */
+  async function backupAll() {
+    try {
+      const res = await fetch('/api/sessions/export');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      const bundle = JSON.parse(text);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+      a.download = `harness-sessions-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+      showToast(`已备份 ${bundle.count} 个会话（含 trace）`);
+    } catch (err) {
+      showToast(`备份失败：${err.message}`);
+    }
   }
 
   window.Panels = {
@@ -281,6 +391,8 @@
     refreshMemory,
     refreshTools,
     refreshWorkflows,
+    refreshTrash,
+    showToast,
     renderState,
     renderTodos,
     setStatus,

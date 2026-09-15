@@ -216,6 +216,38 @@ tool_result     task 成功
 - 内置 `code-review`（结构/风险/测试三路并行 → 汇总）和 `research`（现状/对比/坑 → 结论）。
 - 三种触发方式：对话里让模型调用 `run_workflow`、右侧面板点「运行」、`POST /api/workflows/run`。
 
+## 数据存在哪 / 会不会丢
+
+会话、trace、记忆、产物全部落在工作区目录下，**服务重启不会丢**：
+
+| 目录 | 内容 |
+|---|---|
+| `.sessions/<id>.json` | 会话：消息、状态、用量、任务清单 |
+| `.sessions/<id>.events.jsonl` | 该会话的完整 trace（一行一个事件） |
+| `.sessions-trash/` | **回收站**：删掉的会话先挪到这里，可恢复 |
+| `.memory/memory.json` | 长期记忆 |
+| `.artifacts/` | 超长工具结果的落盘产物 |
+
+启动日志会直接打出计数，方便确认：
+
+```
+会话 = 3 个（D:\Agent\DSH\harness\.sessions）· 回收站 = 0 个（D:\Agent\DSH\harness\.sessions-trash）
+最近会话 = 3f78450d/用子代理帮我列一下当前工作区的文件 · 4e9e2c60/[子代理] 列工作区文件
+```
+
+**删除是软的**：侧栏点 ✕ 只是移进回收站，同一条 toast 里有「撤销」；
+设置 → **回收站** 可以恢复、彻底删除或清空。恢复会把 `.json` 和 `.events.jsonl` 一起搬回来，
+trace 不丢。只有 `DELETE /api/sessions/:id?hard=1` 才是真删。
+
+**备份**：设置 → 回收站 → 「备份全部会话」，下载一个 JSON（含每个会话的消息与完整 trace）；
+也可以直接 `GET /api/sessions/export`。想定期备份就挂个任务：
+
+```powershell
+Invoke-WebRequest 'http://127.0.0.1:5175/api/sessions/export' -OutFile "backup-$(Get-Date -f yyyyMMdd).json"
+```
+
+> 注意：这些都是**普通文件**。如果手动 `Remove-Item .sessions\*`，那就绕过了回收站，无法恢复。
+
 ## 沙箱：用户可选作用区域
 
 每个会话可以独立设置「agent 能碰哪儿」。设置 → **沙箱**，或点输入框旁边的 `🔒 工作区 · 可写` 徽标直达。
@@ -306,7 +338,11 @@ tool_result     task 成功
 | POST | `/api/sandbox/test` | 拿一组配置跑 8 条固定用例，返回放行/拒绝结果 |
 | GET | `/api/sessions/:id/sandbox` | 该会话生效的沙箱配置 + 拒绝记录 |
 | GET/POST | `/api/sessions` | 列表 / 新建 |
-| GET/DELETE | `/api/sessions/:id` | 详情 / 删除 |
+| GET/DELETE | `/api/sessions/:id` | 详情 / 删除（默认软删除进回收站，`?hard=1` 才真删） |
+| GET | `/api/sessions/trash` | 回收站列表 |
+| POST | `/api/sessions/trash/:trashId/restore` | 从回收站恢复（含 trace） |
+| DELETE | `/api/sessions/trash[/:trashId]` | 彻底删除一条 / 清空回收站 |
+| GET | `/api/sessions/export` | **备份全部会话**（含消息与 trace） |
 | POST | `/api/sessions/:id/abort` | 中止当前轮 |
 | GET | `/api/sessions/:id/events` `/artifacts` | trace 事件（带 group/summary）/ 产物列表 |
 | GET | `/api/sessions/:id/trace?format=jsonl\|json\|md` | **导出 trace**（附件下载） |

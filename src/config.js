@@ -55,6 +55,8 @@ export const config = {
   // ---- 持久化 ----
   sessionsDir: path.resolve(env.SESSIONS_DIR || '.sessions'),
   artifactsDir: path.resolve(env.ARTIFACTS_DIR || '.artifacts'),
+  // 删除的会话先进回收站（默认 .sessions-trash），确认无误再彻底清空
+  trashDir: path.resolve(env.TRASH_DIR || '.sessions-trash'),
 };
 
 export function publicConfig() {

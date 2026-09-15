@@ -65,7 +65,7 @@ try {
   console.log(`  测试连接: ${testResult.slice(0, 110)}`);
 
   // 设置里的六个分区：任务 / 记忆 / 工具 / 工作流 都住在这里
-  for (const sec of ['model', 'chat', 'todos', 'memory', 'tools', 'workflows']) {
+  for (const sec of ['model', 'chat', 'sandbox', 'todos', 'memory', 'tools', 'workflows', 'trash']) {
     await evalJs(`document.querySelector('.snav[data-sec="${sec}"]').click(); true`);
     await sleep(450);
     const info = JSON.parse(
@@ -217,6 +217,39 @@ try {
     console.log('  ✗ 没有渲染出工具卡片');
     failed = true;
   }
+
+  // 删除会话必须是「进回收站 + 可撤销」，不能静默丢历史
+  const before = await evalJs(`document.querySelectorAll('.session-item').length`);
+  await evalJs(`document.querySelector('.session-item .del').click(); true`);
+  await waitFor(`!document.getElementById('toast').hidden`, '删除后的提示出现', 10000);
+  const toastInfo = JSON.parse(
+    await evalJs(`JSON.stringify({
+      text: document.getElementById('toastText').textContent,
+      action: document.getElementById('toastAction').hidden ? null : document.getElementById('toastAction').textContent,
+      sessions: document.querySelectorAll('.session-item').length,
+    })`),
+  );
+  okCheck('删除会话提示「已移入回收站」', /回收站/.test(toastInfo.text), toastInfo.text);
+  okCheck('提示里带撤销按钮', toastInfo.action === '撤销');
+  okCheck('会话从侧栏消失', toastInfo.sessions === before - 1, `${before} → ${toastInfo.sessions}`);
+
+  await evalJs(`document.getElementById('toastAction').click(); true`);
+  await waitFor(`document.querySelectorAll('.session-item').length === ${before}`, '撤销后会话回来', 10000);
+  okCheck('点撤销后会话恢复', true, `${before} 个`);
+
+  // 回收站面板能列出被删的会话
+  await evalJs(`document.getElementById('openSettings').click(); true`);
+  await waitFor(`!document.getElementById('settingsModal').hidden`, '设置打开');
+  await evalJs(`document.querySelector('.snav[data-sec="trash"]').click(); true`);
+  await sleep(500);
+  const trashInfo = JSON.parse(
+    await evalJs(`JSON.stringify({
+      items: document.querySelectorAll('#trashList .mem-item').length,
+      hasBackup: !!document.getElementById('backupSessions'),
+      hasPurge: !!document.getElementById('purgeTrash'),
+    })`),
+  );
+  okCheck('设置里有回收站面板与备份/清空按钮', trashInfo.hasBackup && trashInfo.hasPurge, `回收站 ${trashInfo.items} 项`);
 } catch (err) {
   console.error(`✗ ui-check 失败: ${err.message}`);
   failed = true;
