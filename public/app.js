@@ -81,51 +81,9 @@
     String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   const scrollDown = () => (els.messages.scrollTop = els.messages.scrollHeight);
 
-  /** 极简 markdown：代码块（带语言标签与复制）/ 行内代码 / 粗体 / 链接 / 标题 / 列表 / 引用 */
+  /** 渲染 markdown：解析器在 public/markdown.js（零依赖，支持完整常用语法） */
   function renderMarkdown(raw) {
-    const parts = String(raw ?? '').split(/```/);
-    return parts
-      .map((part, i) => {
-        if (i % 2 === 1) {
-          const m = /^([a-zA-Z0-9+#._-]*)\n?/.exec(part);
-          const lang = (m?.[1] || '').trim();
-          const code = part.slice(m?.[0].length ?? 0);
-          return (
-            `<div class="codeblock">` +
-            (lang ? `<span class="lang">${esc(lang)}</span>` : '') +
-            `<button class="copy" type="button">复制</button><pre>${esc(code)}</pre></div>`
-          );
-        }
-        return renderBlocks(part);
-      })
-      .join('');
-  }
-
-  function renderBlocks(text) {
-    const inline = (s) =>
-      esc(s)
-        .replace(/`([^`\n]+)`/g, '<code class="inline">$1</code>')
-        .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
-    const out = [];
-    let list = null;
-    for (const line of String(text).split('\n')) {
-      if (/^\s*[-*]\s+/.test(line)) {
-        (list = list || []).push(`<li>${inline(line.replace(/^\s*[-*]\s+/, ''))}</li>`);
-        continue;
-      }
-      if (list) {
-        out.push(`<ul>${list.join('')}</ul>`);
-        list = null;
-      }
-      if (/^###\s/.test(line)) out.push(`<h3>${inline(line.slice(4))}</h3>`);
-      else if (/^##\s/.test(line)) out.push(`<h2>${inline(line.slice(3))}</h2>`);
-      else if (/^#\s/.test(line)) out.push(`<h1>${inline(line.slice(2))}</h1>`);
-      else if (/^>\s?/.test(line)) out.push(`<blockquote>${inline(line.replace(/^>\s?/, ''))}</blockquote>`);
-      else out.push(inline(line));
-    }
-    if (list) out.push(`<ul>${list.join('')}</ul>`);
-    return out.join('\n');
+    return window.MD ? window.MD.render(raw) : esc(raw);
   }
 
   const TOOL_ICON = {
@@ -148,7 +106,7 @@
       wrap.append(av);
     }
     const body = el('div', 'body');
-    const bubble = el('div', 'bubble');
+    const bubble = el('div', role === 'assistant' ? 'bubble md' : 'bubble');
     bubble.innerHTML = renderMarkdown(text ?? '');
     body.append(bubble);
     wrap.append(body);

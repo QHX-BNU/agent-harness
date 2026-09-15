@@ -9,9 +9,13 @@
 |---|---|
 | ![对话](docs/ui-done-dark.png) | ![Trace](docs/ui-trace-modal.png) |
 
-| 设置 · 工具开关 | 沙箱 · 作用区域与自测 |
+| 设置 · 工具开关 | Markdown 渲染 |
 |---|---|
-| ![设置](docs/ui-settings.png) | ![沙箱](docs/ui-sandbox.png) |
+| ![设置](docs/ui-settings.png) | ![Markdown](docs/ui-markdown.png) |
+
+| 沙箱 · 作用区域与自测 | Trace 面板 |
+|---|---|
+| ![沙箱](docs/ui-sandbox.png) | ![Trace 面板](docs/ui-trace-tab.png) |
 
 
 ```
@@ -53,6 +57,7 @@
 | 事件 | `src/events.js` | 30+ 事件类型，同时喂 SSE 与终端彩色日志 |
 | 服务 | `server.js` | 20+ REST 端点 + 3 条 SSE 流 |
 | 前端 | `public/` | 三栏布局、流式渲染、思考块、工具卡片、审批按钮、状态与 Trace 面板、设置弹窗 |
+| **Markdown** | `public/markdown.js` | 自研零依赖解析器：标题(h1-h6/setext) / 粗斜体 / 删除线 / 行内与围栏代码 / 有序无序嵌套列表 / 任务列表 / 引用(可嵌套) / 表格(对齐) / 链接图片自动链接 / 分隔线 / 硬换行 / 转义；先转义 HTML 再做解析，链接协议白名单 |
 
 ---
 
@@ -219,6 +224,9 @@ category: anchor / structure / knowledge / situation / self
 - **顶栏**：只有一个状态胶囊（`idle / running / awaiting_approval / aborted / error`）、
   当前模型元信息和 Trace 按钮。
 - **输入区上方**：供应商下拉 + 模型名 + 审批模式，发消息前随手就能切。
+- **Markdown 渲染**：模型的输出按完整 Markdown 语法渲染（标题 / 表格 / 嵌套列表 / 任务列表 /
+  引用 / 代码块带语言标签与一键复制 / 链接图片 / 分隔线），代码块内容与 HTML 标签一律转义，
+  `javascript:`、`data:` 之类的链接协议被拦掉。
 - **设置弹窗（左下角齿轮）**：左侧分区导航，右侧内容——
   - **模型**：供应商 / 模型 / **API Key**（密码框，可切换明文）/ Base URL，
     **测试连接**会拿表单里的值真打一次 `/api/probe`，显示模型名、延迟、是否支持
@@ -265,17 +273,18 @@ SSE 事件类型（30+）：`session` `model` `state` `step` `assistant_delta` `
 `assistant_message` `tool_call` `tool_result` `approval_request` `approval_result` `todos`
 `memory_recall` `memory` `subagent_start` `subagent_done` `workflow_*` `usage` `retry` `error` `done`。
 
-## 测试：七层，全部真跑
+## 测试：八层，全部真跑
 
 ```powershell
 node scripts/port-test.js      # 模型端口：假厂商跑通两条协议 + 重试 + 错误归一化（37 项）
 node scripts/harness-test.js   # 内核：状态/记忆/工具/策略/上下文/子代理/工作流/循环（72 项）
-node scripts/api-test.js       # HTTP：25 个端点（需先起服务）
+node scripts/api-test.js       # HTTP：29 个端点（需先起服务）
 node scripts/e2e.js            # 对话链路：工具调用 + 审批 + 结果回灌（需先起服务）
-node scripts/ui-check.js       # 前端：设置弹窗 / 审批按钮 / 五个面板 / 布局体检 / 深色主题
+node scripts/ui-check.js       # 前端：设置 / 审批 / 面板 / 布局体检 / 深色主题
 node scripts/ui-key-test.js    # 界面填 API key 专项：填 key → 测试连接 → 保存 → 真发一轮（需 fake-llm）
 node scripts/trace-test.js     # Trace：事件记录 → 标签页/弹窗查看 → 三种格式导出（29 项）
 node scripts/sandbox-test.js   # 沙箱：作用区域/权限/命令扫描/环境清洗/后端/审计/界面（76 项）
+node scripts/markdown-test.js  # Markdown：65 条语法与安全断言 + 全特性渲染截图
 ```
 
 `scripts/cdp.js` 是共享的浏览器驱动（Node 24 自带 WebSocket，零依赖），

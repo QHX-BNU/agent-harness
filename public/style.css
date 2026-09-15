@@ -359,29 +359,75 @@ select { cursor: pointer; }
 .msg.notice .avatar, .msg.error .avatar { display: none; }
 
 /* markdown */
-.bubble p { margin: 0 0 8px; }
-.bubble p:last-child { margin-bottom: 0; }
-.bubble h1, .bubble h2, .bubble h3 { margin: 12px 0 6px; font-size: 15px; }
-.bubble ul, .bubble ol { margin: 6px 0; padding-left: 20px; }
-.bubble li { margin: 2px 0; }
-.bubble a { color: var(--brand); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--brand) 40%, transparent); }
-.bubble blockquote {
-  margin: 8px 0; padding: 4px 12px;
-  border-left: 2px solid var(--border-hi); color: var(--dim);
-}
+/* markdown 正文：块级元素自己管间距，关掉 pre-wrap */
+.bubble.md { white-space: normal; }
+.bubble.md > *:first-child { margin-top: 0; }
+.bubble.md > *:last-child { margin-bottom: 0; }
 
-.codeblock { position: relative; margin: 9px 0; }
+.bubble h1, .bubble h2, .bubble h3, .bubble h4, .bubble h5, .bubble h6 {
+  margin: 16px 0 8px; line-height: 1.35; font-weight: 650;
+}
+.bubble h1 { font-size: 19px; padding-bottom: 6px; border-bottom: 1px solid var(--border-soft); }
+.bubble h2 { font-size: 16.5px; padding-bottom: 5px; border-bottom: 1px solid var(--border-soft); }
+.bubble h3 { font-size: 15px; }
+.bubble h4 { font-size: 14px; }
+.bubble h5, .bubble h6 { font-size: 13px; color: var(--text-2); }
+
+.bubble p { margin: 0 0 10px; }
+.bubble p:last-child { margin-bottom: 0; }
+
+.bubble ul, .bubble ol { margin: 8px 0; padding-left: 22px; }
+.bubble li { margin: 3px 0; }
+.bubble li > ul, .bubble li > ol { margin: 4px 0; }
+.bubble ul { list-style: disc; }
+.bubble ul ul { list-style: circle; }
+.bubble ul ul ul { list-style: square; }
+.bubble ol { list-style: decimal; }
+.bubble li.task { list-style: none; margin-left: -20px; display: flex; gap: 7px; align-items: flex-start; }
+.bubble li.task input[type='checkbox'] { accent-color: var(--brand); margin-top: 5px; flex: none; }
+
+.bubble blockquote {
+  margin: 10px 0; padding: 4px 14px;
+  border-left: 3px solid color-mix(in srgb, var(--brand) 50%, var(--border));
+  color: var(--text-2);
+  background: color-mix(in srgb, var(--brand) 5%, transparent);
+  border-radius: 0 8px 8px 0;
+}
+.bubble blockquote > *:last-child { margin-bottom: 0; }
+
+.bubble hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+.bubble del { color: var(--dim); }
+.bubble img { max-width: 100%; border-radius: var(--r); margin: 6px 0; border: 1px solid var(--border-soft); }
+.bubble a { color: var(--brand); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--brand) 40%, transparent); }
+.bubble a:hover { border-bottom-color: var(--brand); }
+
+.table-wrap { overflow-x: auto; margin: 10px 0; border: 1px solid var(--border); border-radius: var(--r); }
+.bubble table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+.bubble th, .bubble td {
+  padding: 7px 11px; text-align: left;
+  border-bottom: 1px solid var(--border-soft);
+  border-right: 1px solid var(--border-soft);
+}
+.bubble th:last-child, .bubble td:last-child { border-right: none; }
+.bubble tbody tr:last-child td { border-bottom: none; }
+.bubble thead th { background: var(--surface-2); font-weight: 600; color: var(--text); white-space: nowrap; }
+.bubble tbody tr:hover { background: color-mix(in srgb, var(--brand) 4%, transparent); }
+
+.codeblock { position: relative; margin: 10px 0; }
 .codeblock .lang {
-  position: absolute; top: 8px; left: 12px;
+  position: absolute; top: 9px; left: 13px;
   font: 10.5px var(--mono); color: var(--dim-2); text-transform: uppercase; letter-spacing: .5px;
+  pointer-events: none;
 }
 .codeblock .copy {
-  position: absolute; top: 6px; right: 6px;
+  position: absolute; top: 6px; right: 6px; z-index: 2;
   font-size: 11px; padding: 2px 8px; border-radius: 6px;
   background: var(--surface-3); border: 1px solid var(--border); color: var(--dim);
   opacity: 0; transition: opacity .15s;
 }
 .codeblock:hover .copy { opacity: 1; }
+.codeblock pre { padding-top: 26px; }
+.codeblock pre code { font: inherit; white-space: pre; }
 pre {
   margin: 0; padding: 26px 13px 12px;
   background: var(--surface-2);

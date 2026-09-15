@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "一个最小但完整的 agent harness 骨架：控制循环 + 模型接入端口 + 工具注册表 + 策略/审批 + 会话持久化 + SSE 前端",
+  "description": "一个完整可用的 agent harness：控制循环 + 模型接入端口 + 状态机 + 记忆 + 工具生态 + 子代理 + 工作流 + 沙箱 + Trace 与导出 + 自带 Web 前端（零第三方依赖）",
   "engines": {
     "node": ">=18"
   },
@@ -19,6 +19,7 @@
     "ui-check": "node scripts/ui-check.js",
     "ui-key-test": "node scripts/ui-key-test.js",
     "trace-test": "node scripts/trace-test.js",
-    "sandbox-test": "node scripts/sandbox-test.js"
+    "sandbox-test": "node scripts/sandbox-test.js",
+    "markdown-test": "node scripts/markdown-test.js"
   }
 }
