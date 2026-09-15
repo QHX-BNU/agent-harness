@@ -213,7 +213,8 @@ section('[2] 群/话题 → 会话映射');
   const firstUserMsg = sessNow.messages.find((m) => m.role === 'user')?.content || '';
   ok('说话人被解析成姓名', firstUserMsg.includes('爱丽丝'), firstUserMsg.split('\n')[0].slice(0, 60));
   ok('同时保留 open_id（可追溯）', firstUserMsg.includes('ou_alice'));
-  ok('姓名进了缓存', channel.state.users.ou_alice === '爱丽丝', JSON.stringify(channel.state.users));
+  ok('姓名进了共享身份缓存', channel.identities.name('ou_alice') === '爱丽丝', JSON.stringify(channel.identities.list().users));
+  ok('身份缓存落盘（digest 工具与历史回填共用）', fs.existsSync(path.join(tmp, '.channels', 'identities.json')));
   const memberCalls = cliCalls.filter((c) => c.includes('+chat-members-list') && c.includes('oc_group_1')).length;
   ok('同群成员列表只拉一次', memberCalls === 1, `${memberCalls} 次`);
 
@@ -300,11 +301,11 @@ section('[3c] 谁做了什么');
   await channel.simulate({ chatId: 'oc_group_b', senderId: 'ou_bob', senderName: '小明', content: '@小助手 帮我把部署脚本改一下' });
   await channel.simulate({ chatId: 'oc_group_b', senderId: 'ou_bob', senderName: '小明', content: '@小助手 再补一个回滚步骤' });
 
-  const ctx = { session: store.get(channel.state.sessions['oc_group_1:main']), store, memory, workspaceId: 'default', config: testConfig };
+  const ctx = { session: store.get(channel.state.sessions['oc_group_1:main']), store, memory, workspaceId: 'default', config: testConfig, identities: channel.identities };
 
   const a = await tools.execute('user_activity', { user: '小明' }, ctx);
-  ok('user_activity 能查到某人在哪个群干活', a.ok && /「小明」/.test(a.content) && /飞书群「/.test(a.content) && /他说过: 帮我把部署脚本改一下/.test(a.content), a.content.split('\n')[0]);
-  ok('能看到他提过什么要求', a.ok && /部署脚本|回滚步骤/.test(a.content), (a.content.match(/他说过: .*/) || [''])[0].slice(0, 60));
+  ok('user_activity 能查到某人在哪个群干活', a.ok && /「小明」/.test(a.content) && /飞书群「/.test(a.content) && /「帮我把部署脚本改一下」/.test(a.content), a.content.split('\n')[0]);
+  ok('能看到他提过什么要求', a.ok && /部署脚本|回滚步骤/.test(a.content), (a.content.match(/「.*?」 →/) || [''])[0].slice(0, 60));
   ok('不会把别人的会话混进来', !/爱丽丝/.test(a.content));
 
   const byId = await tools.execute('user_activity', { user: 'ou_bob' }, ctx);
@@ -342,6 +343,20 @@ section('[3c] 谁做了什么');
   ok('关闭跨群后 session_list 被拒', blockedList.ok && /已被关闭/.test(blockedList.content));
   const blockedRead = await tools.execute('session_read', { session: bSess.id }, blockedCtx);
   ok('关闭跨群后 session_read 被拒', blockedRead.ok && /已被关闭/.test(blockedRead.content));
+
+  // 问答配对：每条要求要配它自己的回答，不能一律配会话最后一条助手消息
+  const { pairsOf } = await import('../src/tools/digest.js');
+  const demoMsgs = [
+    { role: 'user', content: '甲：问题一', sender: { id: 'ou_a', name: '甲', at: 1 } },
+    { role: 'assistant', content: '回答一' },
+    { role: 'user', content: '乙：问题二', sender: { id: 'ou_b', name: '乙', at: 2 } },
+    { role: 'assistant', content: '回答二' },
+  ];
+  const pairsA = pairsOf(demoMsgs, 'ou_a');
+  ok('问答配对取的是自己那条的回答', pairsA.length === 1 && pairsA[0].answer === '回答一', JSON.stringify(pairsA));
+  // 老消息（只有正文前缀、没有结构化字段）也要认得出来，且正文不带前缀
+  const legacy = pairsOf([{ role: 'user', content: '[飞书群「X」 · ou_0000000000000000000000000000aaaa(ou_0000000000000000000000000000aaaa)] 老问题' }, { role: 'assistant', content: '老回答' }], 'ou_0000000000000000000000000000aaaa');
+  ok('老消息（前缀形式）也能配对且去掉前缀', legacy.length === 1 && legacy[0].ask === '老问题', JSON.stringify(legacy));
 }
 
 // ================= 4. 回复内容与分片 =================

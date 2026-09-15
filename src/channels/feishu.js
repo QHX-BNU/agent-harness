@@ -20,6 +20,7 @@ import { Policy } from '../policy.js';
 import { createProvider } from '../providers/index.js';
 import { createSandbox } from '../sandbox.js';
 import { getRuntimeModel } from '../runtime-model.js';
+import { IdentityStore, defaultIdentityFile } from '../identities.js';
 
 const truncate = (s, n) => (String(s ?? '').length > n ? `${String(s).slice(0, n)}…` : String(s ?? ''));
 
@@ -50,6 +51,7 @@ export function createFeishuChannel({
   workflows,
   broker,
   stateFile,
+  identitiesIn = null,
   log = console.log,
   // 依赖注入：测试时替换成假的
   spawnImpl = spawn,
@@ -64,6 +66,11 @@ export function createFeishuChannel({
       /* 坏文件就当空的 */
     }
   }
+  // 真实姓名/群名放在共享身份缓存里（digest 工具、历史回填都读它）
+  const identities = identitiesIn || new IdentityStore({ file: stateFile ? path.join(path.dirname(stateFile), 'identities.json') : defaultIdentityFile(config.sessionsDir) });
+  // 老状态文件里的 users/chats 迁进去
+  identities.setUsers(Object.fromEntries(Object.entries(state.users || {}).filter(([, n]) => n && !/^ou_/.test(n))));
+  for (const [chatId, c] of Object.entries(state.chats || {})) if (c?.name) identities.setChat(chatId, c.name);
   if (state.botOpenId && !cfg.botOpenId) cfg.botOpenId = state.botOpenId;
   const persist = () => {
     if (!stateFile) return;
@@ -157,13 +164,11 @@ export function createFeishuChannel({
   /** 给某个 open_id 找名字（找不到就返回 null，调用方退回 id） */
   async function resolveName(chatId, openId) {
     if (!openId) return null;
-    if (state.users[openId]) return state.users[openId];
+    const cached = identities.name(openId);
+    if (cached) return cached;
     const map = await resolveMembers(chatId);
     const name = map[openId] || null;
-    if (name) {
-      state.users[openId] = name;
-      persist();
-    }
+    if (name) identities.setUser(openId, name);
     return name;
   }
 
@@ -181,6 +186,7 @@ export function createFeishuChannel({
       const name = j?.data?.chat?.name || j?.data?.name || null;
       if (!name) return null;
       state.chats[chatId] = { ...(state.chats[chatId] || {}), name, lastAt: Date.now() };
+      identities.setChat(chatId, name);
       persist();
       const sid = state.sessions[`${chatId}:main`] || state.sessions[`${chatId}:${cur.threadKey || 'main'}`];
       const s = sid ? store.get(sid) : null;
@@ -230,7 +236,7 @@ export function createFeishuChannel({
   /** 交给模型看的输入：带上来源，让它可以跨群聚合时区分谁说的 */
   function decoratePrompt(ev, text, session) {
     const chat = state.chats[ev.chat_id] || {};
-    const who = state.users[ev.sender_id] || ev.sender_name || ev.sender_id;
+    const who = identities.name(ev.sender_id) || ev.sender_name || ev.sender_id;
     const where = ev.chat_type === 'p2p' ? '飞书私聊' : `飞书群「${chat.name || String(ev.chat_id).slice(-6)}」`;
     return `[${where} · ${who}(${ev.sender_id})]\n${text}`;
   }
@@ -399,13 +405,15 @@ export function createFeishuChannel({
         memory,
         agents,
         workflows,
+        // digest 工具用它把 open_id 还原成真实姓名
+        identities,
         // 结构化记下「谁在哪个群说的」——跨群查「某人做了什么」全靠它
         userMeta: {
           id: ev.sender_id,
-          name: state.users[ev.sender_id] || ev.sender_name || null,
+          name: identities.name(ev.sender_id) || ev.sender_name || null,
           chatId: ev.chat_id,
           chatType: ev.chat_type,
-          chatTitle: (state.chats[ev.chat_id] || {}).name || null,
+          chatTitle: identities.chatName(ev.chat_id) || (state.chats[ev.chat_id] || {}).name || null,
           threadKey: ev.thread_id || ev.root_id || 'main',
           messageId: ev.message_id,
         },
@@ -455,7 +463,7 @@ export function createFeishuChannel({
       mentions: mentions || [{ id: cfg.botOpenId || state.botOpenId, key: '@_user_1', name: cfg.botName }],
       create_time: String(Date.now()),
     };
-    if (senderName) state.users[senderId] = senderName;
+    if (senderName) identities.setUser(senderId, senderName);
     return handleEvent(ev, { dryRun: true });
   }
 
@@ -606,8 +614,10 @@ export function createFeishuChannel({
     /** 记录群名，让日志与 prompt 更可读 */
     noteChat(chatId, name) {
       state.chats[chatId] = { ...(state.chats[chatId] || {}), name, lastAt: Date.now() };
+      identities.setChat(chatId, name);
       persist();
     },
+    identities,
     ensureChatName,
     noteBotOpenId(id) {
       state.botOpenId = id;

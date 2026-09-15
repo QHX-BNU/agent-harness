@@ -3,8 +3,22 @@
 //
 // 说话人来历：新消息在 message.sender 里带结构化元数据；老消息只有正文前缀
 // `[飞书群「X」 · 名字(ou_xxx)]`，所以这里做了一层兼容解析。
+import { looksLikeId } from '../identities.js';
 
 const PREFIX_RE = /^\[(飞书群「(.+?)」|飞书私聊) · (.+?)\((ou_[A-Za-z0-9]+)\)\]/;
+
+/** 显示用姓名：消息里存的名字 → 身份缓存 → 退回顾 open_id */
+function displayName(ctx, sender) {
+  if (!sender) return null;
+  const stored = sender.name && !looksLikeId(sender.name) ? sender.name : null;
+  return stored || ctx?.identities?.name?.(sender.id) || sender.name || sender.id;
+}
+
+/** 群名同理：缓存里有真名就用真名 */
+function displayChat(ctx, sender, fallback = null) {
+  const title = sender?.chatTitle && !looksLikeId(sender.chatTitle) ? sender.chatTitle : null;
+  return title || ctx?.identities?.chatName?.(sender?.chatId) || fallback || sender?.chatTitle || null;
+}
 
 /** 从一条用户消息里取出说话人（结构化优先，退回解析正文前缀） */
 export function senderOf(message) {
@@ -22,8 +36,9 @@ export function sendersOf(session) {
     const s = senderOf(msg);
     if (!s?.id) continue;
     const cur = map.get(s.id) || { id: s.id, name: s.name || null, chats: new Set(), messages: 0, lastAt: 0 };
-    if (s.name) cur.name = s.name;
-    if (s.chatTitle) cur.chats.add(s.chatTitle);
+    // 真名优先：老消息前缀里塞的可能是 open_id
+    if (s.name && !looksLikeId(s.name)) cur.name = s.name;
+    if (s.chatTitle && !looksLikeId(s.chatTitle)) cur.chats.add(s.chatTitle);
     cur.messages++;
     cur.lastAt = Math.max(cur.lastAt, s.at || 0);
     map.set(s.id, cur);
@@ -34,7 +49,10 @@ export function sendersOf(session) {
 const where = (session) => {
   const ch = session?.channel;
   if (ch?.type === 'feishu') {
-    return ch.chatType === 'p2p' ? '飞书私聊' : `飞书群「${session.title || ch.chatId}」`;
+    if (ch.chatType === 'p2p') return '飞书私聊';
+    // 标题可能已经是「飞书群 xxx」这种占位，别再套一层
+    const title = String(session.title || ch.chatId || '').replace(/^飞书群\s*/, '');
+    return `飞书群「${title}」`;
   }
   return '网页';
 };
@@ -61,13 +79,32 @@ function crossGroupBlocked(ctx) {
 }
 
 /** 展示正文时去掉来源前缀（说话人已经单独标出来了，避免重复） */
-const bodyOf = (message) => {
-  const text = String(message?.content || '');
-  return message?.sender?.id ? text.replace(PREFIX_RE, '').trim() : text;
-};
+const bodyOf = (message) => String(message?.content || '').replace(PREFIX_RE, '').trim();
 
 /** 会话里的任务清单（模型用 todo_write 维护的） */
 const todosOf = (session) => (session?.todos || []).map((t) => `[${t.status}] ${t.content}`);
+
+/**
+ * 把「某人说的每一句」和「紧随其后的那条回答」配成对。
+ * 不能直接用会话最后一条助手消息——那个可能是别人问的，配对会张冠李戴。
+ */
+export function pairsOf(messages, userId, ctx = null) {
+  const out = [];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role !== 'user') continue;
+    const sender = senderOf(m);
+    if (sender?.id !== userId) continue;
+    const answer = messages.slice(i + 1).find((x) => x.role === 'assistant' && x.content && !x.toolCalls?.length);
+    out.push({
+      ask: oneLine(bodyOf(m), 110),
+      answer: oneLine(answer?.content, 200),
+      at: sender?.at || 0,
+      chatTitle: displayChat(ctx, sender),
+    });
+  }
+  return out;
+}
 
 export const sessionList = {
   name: 'session_list',
@@ -95,14 +132,14 @@ export const sessionList = {
       if (keyword && !(s.title || '').includes(keyword)) continue;
       if (s.updatedAt < since) continue;
       const full = ctx.store.get(s.id);
-      const people = sendersOf(full);
+      const people = sendersOf(full).map((p) => ({ ...p, display: displayName(ctx, p) }));
       if (user) {
         const q = String(user).toLowerCase();
-        if (!people.some((p) => p.id.toLowerCase() === q || (p.name || '').toLowerCase().includes(q))) continue;
+        if (!people.some((p) => p.id.toLowerCase() === q || (p.display || '').toLowerCase().includes(q))) continue;
       }
       if (rows.length >= (Number(limit) || 20)) break;
       const last = [...(full?.messages || [])].reverse().find((m) => m.role === 'assistant' && m.content);
-      const who = people.length ? `参与者: ${people.map((p) => p.name || p.id).slice(0, 4).join(', ')}` : '（没有记录到说话人）';
+      const who = people.length ? `参与者: ${people.map((p) => p.display).slice(0, 4).join(', ')}` : '（没有记录到说话人）';
       rows.push(
         `- [${s.id}] ${s.title || '未命名'}（${where(full)}，${ago(s.updatedAt)}，${s.messages} 条消息）\n` +
           `  ${who}\n` +
@@ -138,14 +175,15 @@ export const sessionRead = {
     const body = msgs
       .map((m) => {
         const sender = senderOf(m);
-        const who = m.role === 'user' ? sender?.name || sender?.id || '用户' : m.role === 'assistant' ? '助手' : `工具 ${m.name || ''}`;
+        const who =
+          m.role === 'user' ? displayName(ctx, sender) || '用户' : m.role === 'assistant' ? '助手' : `工具 ${m.name || ''}`;
         return `【${who}】${oneLine(bodyOf(m), 300) || '(空)'}`;
       })
       .join('\n');
-    const people = sendersOf(s);
+    const people = sendersOf(s).map((p) => ({ ...p, display: displayName(ctx, p) }));
     return (
       `会话 ${s.id}「${s.title || '未命名'}」（${where(s)}，${s.messages} 条消息，最近 ${msgs.length} 条）\n` +
-      `参与者: ${people.map((p) => `${p.name || p.id}(${p.id})`).join(', ') || '无记录'}\n` +
+      `参与者: ${people.map((p) => `${p.display}(${p.id})`).join(', ') || '无记录'}\n` +
       `${body}`
     );
   },
@@ -179,20 +217,19 @@ export const userActivity = {
 
     for (const s of all) {
       const full = ctx.store.get(s.id);
-      const senders = sendersOf(full);
-      for (const p of senders) people.set(p.id, p.name || p.id);
-      const me = senders.find((p) => p.id.toLowerCase() === q || (p.name || '').toLowerCase().includes(q));
+      const senders = sendersOf(full).map((p) => ({ ...p, display: displayName(ctx, p) }));
+      for (const p of senders) people.set(p.id, p.display);
+      const me = senders.find((p) => p.id.toLowerCase() === q || (p.display || '').toLowerCase().includes(q));
       if (!me) continue;
-      const asks = (full.messages || [])
-        .filter((m) => m.role === 'user' && senderOf(m)?.id === me.id)
-        .slice(-3)
-        .map((m) => oneLine(bodyOf(m), 100));
+      const threads = pairsOf(full?.messages || [], me.id, ctx);
       const last = [...(full.messages || [])].reverse().find((m) => m.role === 'assistant' && m.content);
       hits.push({
         session: full,
         me,
-        recent: (full.messages || []).some((m) => senderOf(m)?.id === me.id && (senderOf(m).at || 0) > since) || s.updatedAt > since,
-        asks,
+        recent:
+          (full.messages || []).some((m) => senderOf(m)?.id === me.id && (senderOf(m).at || 0) > since) ||
+          s.updatedAt > since,
+        threads,
         last: oneLine(last?.content, 160),
         todos: todosOf(full),
       });
@@ -208,16 +245,16 @@ export const userActivity = {
     }
 
     const lines = fresh.slice(0, Number(limit) || 10).map((h) => {
-      const t = h.todos.length ? `\n    任务: ${h.todos.slice(0, 4).join(' / ')}` : '';
-      return (
-        `- ${where(h.session)}（${ago(h.session.updatedAt)}，${h.me.messages} 条发言）\n` +
-        h.asks.map((a) => `    他说过: ${a}`).join('\n') +
-        `\n    结论: ${h.last || '（还没有结论）'}${t}`
-      );
+      const recent = h.threads.slice(-3);
+      const body = recent
+        .map((t) => `    · 「${t.ask}」 → ${t.answer ? oneLine(t.answer, 160) : '（还没回复）'}`)
+        .join('\n');
+      const t = h.todos.length ? `\n    任务清单: ${h.todos.slice(0, 4).join(' / ')}` : '';
+      return `- ${where(h.session)}（${ago(h.session.updatedAt)}，共 ${h.me.messages} 条发言）\n${body}${t}`;
     });
 
     return (
-      `「${fresh[0].me.name || user}」在最近 ${hours} 小时内出现在 ${fresh.length} 个会话里：\n` +
+      `「${fresh[0].me.display || user}」在最近 ${hours} 小时内出现在 ${fresh.length} 个会话里：\n` +
       lines.join('\n') +
       `\n\n提示：这些是跨群汇总的信息，回答时说明来源（哪个群），别把 A 群的结论按到 B 群头上。`
     );

@@ -16,6 +16,7 @@ import { createWorkflowEngine } from './src/workflow.js';
 import { WorkspaceStore, DEFAULT_WORKSPACE_ID } from './src/workspaces.js';
 import { createFeishuChannel } from './src/channels/feishu.js';
 import { setRuntimeModel, describeRuntimeModel } from './src/runtime-model.js';
+import { IdentityStore } from './src/identities.js';
 import { createProvider, listProviders, resolveProviderConfig } from './src/providers/index.js';
 import { createSandbox, SCOPE_PRESETS, MODES, backendAvailable } from './src/sandbox.js';
 import { runTurn } from './src/loop.js';
@@ -44,10 +45,14 @@ const agents = createAgentRunner({ config, store, tools, memory, createProvider,
 const workflows = createWorkflowEngine({ dir: config.workflowsDir, agents, config });
 
 // 飞书通道：把「群里 @ 机器人」接到同一套内核上（工具/沙箱/记忆/trace 全部复用）
+// 身份缓存：open_id → 真实姓名（飞书事件只有 id，名字要单独查；digest 工具与通道共用一份）
+const identities = new IdentityStore({ file: path.join(config.sessionsDir, '..', '.channels', 'identities.json') });
+
 const feishu = createFeishuChannel({
   config,
   store,
   workspaces,
+  identitiesIn: identities,
   tools,
   memory,
   agents,
@@ -305,6 +310,7 @@ async function handleChat(req, res) {
       agents,
       workflows,
       sandbox,
+      identities,
       // 本次请求实际用的凭证，子代理/工作流必须继承（否则会退回服务端环境变量）
       modelConfig: {
         provider: provider.id,

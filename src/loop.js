@@ -27,6 +27,8 @@ export async function runTurn({
   depth = 0,
   // 说话人元数据（飞书通道会带：谁在哪个群说的）。结构化存下来，才能回答「某人做了什么」
   userMeta = null,
+  // 身份缓存：把 open_id 还原成真实姓名（事件里只有 id，没有名字）
+  identities = null,
 }) {
   // trace 由 loop 自己负责持久化：任何入口（HTTP / CLI / 子代理）跑一轮都会留下事件日志
   const emit = (ev) => {
@@ -81,6 +83,7 @@ export async function runTurn({
     config,
     depth,
     workspaceId: session.workspaceId || 'default',
+    identities,
   };
 
   let steps = 0;
