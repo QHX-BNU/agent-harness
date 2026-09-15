@@ -84,8 +84,12 @@
 
   function setStatus(status) {
     const pill = $('statusPill');
-    pill.className = `pill ${status || 'idle'}`;
-    pill.textContent = status || 'idle';
+    if (!pill) return;
+    const s = status || 'idle';
+    pill.className = `pill ${s}`;
+    // 只改文字节点，不能整个替换 innerHTML——否则里面的 #statusText 会被干掉
+    const txt = pill.querySelector('#statusText');
+    if (txt) txt.textContent = s;
   }
 
   function renderTodos(todos) {

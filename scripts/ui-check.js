@@ -96,6 +96,21 @@ try {
   await waitFor(`document.getElementById('stop').hidden === true`, '本轮结束', 30000);
   const doneShot = await shot('ui-done.png');
 
+  // 关键 DOM 在跑完一轮后必须还活着（曾经被 panels 的 textContent 整块替换掉过）
+  const alive = JSON.parse(
+    await evalJs(`JSON.stringify({
+      statusText: document.getElementById('statusText')?.textContent ?? null,
+      pillClass: document.getElementById('statusPill')?.className ?? null,
+      sessionTitle: document.getElementById('sessionTitle')?.textContent ?? null,
+      composer: !!document.querySelector('.composer-input textarea'),
+      send: !!document.getElementById('send'),
+      traceTab: !!document.querySelector('.tab[data-tab="trace"]'),
+    })`),
+  );
+  okCheck('状态胶囊跑完一轮后仍完好', alive.statusText === 'idle' && /^pill /.test(alive.pillClass || ''), `${alive.statusText} / ${alive.pillClass}`);
+  okCheck('顶栏与会话标题未被破坏', Boolean(alive.sessionTitle) && alive.sessionTitle !== '新会话', alive.sessionTitle);
+  okCheck('输入区与 Trace 标签都在', alive.composer && alive.send && alive.traceTab);
+
   // 布局体检：不靠肉眼，直接量 bounding box，抓溢出/重叠/塌陷
   const layout = JSON.parse(
     await evalJs(`(() => {

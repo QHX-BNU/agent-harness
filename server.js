@@ -13,7 +13,7 @@ import { ApprovalBroker, Policy } from './src/policy.js';
 import { createToolRegistry } from './src/tools/index.js';
 import { createAgentRunner } from './src/agents.js';
 import { createWorkflowEngine } from './src/workflow.js';
-import { createProvider, listProviders } from './src/providers/index.js';
+import { createProvider, listProviders, resolveProviderConfig } from './src/providers/index.js';
 import { createSandbox, SCOPE_PRESETS, MODES, backendAvailable } from './src/sandbox.js';
 import { runTurn } from './src/loop.js';
 import { createEmitter } from './src/events.js';
@@ -325,7 +325,25 @@ const server = http.createServer(async (req, res) => {
 
   try {
     // --- 基础信息 ---
-    if (req.method === 'GET' && p === '/api/config') return json(res, 200, publicConfig());
+    if (req.method === 'GET' && p === '/api/config') {
+      const cfg = publicConfig();
+      // 把默认模型解析成实际会用的那个（MODEL 留空时用厂商预设的第一个）
+      try {
+        const resolved = resolveProviderConfig({
+          provider: cfg.provider,
+          model: cfg.model,
+          baseUrl: cfg.baseUrl,
+          apiKey: cfg.apiKey,
+        });
+        cfg.model = resolved.model;
+        cfg.baseUrl = resolved.baseUrl;
+        cfg.protocol = resolved.protocol;
+        cfg.providerLabel = resolved.label;
+      } catch (err) {
+        cfg.modelError = err.message;
+      }
+      return json(res, 200, cfg);
+    }
     if (req.method === 'GET' && p === '/api/providers') return json(res, 200, listProviders({}, config.provider));
     if (req.method === 'POST' && p === '/api/probe') return await handleProbe(req, res);
 
