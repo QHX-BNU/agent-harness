@@ -24,11 +24,8 @@
     "agents-test": "node scripts/agents-test.js",
     "workspace-test": "node scripts/workspace-test.js",
     "feishu-test": "node scripts/feishu-test.js",
-    "docker-check": "node scripts/docker-check.js",
-    "container-check": "node scripts/container-check.js"
-  },
-  "container": {
-    "image": "mini-harness",
-    "run": "docker run --rm -p 5175:5175 -v .:/workspace mini-harness"
+    "run-check": "node scripts/run-check.js",
+    "runtime-check": "node scripts/runtime-check.js",
+    "setup-runtime": "node scripts/setup-runtime.js"
   }
 }

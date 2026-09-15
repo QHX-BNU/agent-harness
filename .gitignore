@@ -16,6 +16,10 @@
 .env
 .env.local
 
+# 项目自带的运行时（Bun 二进制 ~80MB，不进 git；打包分发时再带上）
+runtime/bin/
+runtime/VERSION
+
 # 测试产物
 e2e/
 ui-check/

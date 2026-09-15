@@ -421,51 +421,37 @@ curl http://127.0.0.1:5175/api/identities
 
 ## 怎么跑
 
-**最快的方式**：本项目零依赖，装了 Node 就能跑，不用 `npm install`。
+**下载项目 → 双击 `run.cmd`（Windows）/ 跑 `./run.sh`（Linux、macOS）→ 打开 http://127.0.0.1:5175**
 
-```powershell
-node server.js          # 打开 http://127.0.0.1:5175
-```
+不用装 Node、不用装 Bun、不用装 Docker、不用 `npm install`。启动脚本会自动挑运行时：
 
-**要隔离就用容器**（镜像约 40MB）：
-
-```powershell
-# Windows
-docker-run.cmd  D:\my-project      # 不传参数就用当前目录当工作区
-```
-```bash
-# Linux / macOS
-./docker-run.sh ~/my-project
-```
-
-或者手动两步：
-
-```bash
-docker build -t mini-harness .
-docker run --rm -p 5175:5175 -v "$PWD:/workspace" mini-harness
-```
-
-| 镜像 | 压缩后 | 说明 |
+| 顺序 | 用什么 | 情况 |
 |---|---|---|
-| `Dockerfile`（默认） | **约 40MB** | Bun 运行时，Alpine 基础层，自带 `sh` |
-| `Dockerfile.node` | 约 56MB | 官方 Node 运行时，最大兼容性 |
+| 1 | **项目自带的 `runtime/bin/bun`** | 打包分发时带上，对方零安装零下载 |
+| 2 | 系统里的 `node` | 已经装了 Node 就直接用，零下载 |
+| 3 | 系统里的 `bun` | —— |
+| 4 | 下载一次 Bun 到 `runtime/` | 约 30–38MB，**只下一次**，之后项目自带运行时（自动校验官方 SHA256） |
 
-为什么能这么小：本项目只用 Node 内置模块，**不需要 npm install**；Node 官方镜像里那 51MB 的发行版
-含 npm / corepack / C++ 头文件，这里全都用不上。Bun 是单文件运行时，本项目**全部测试（10 个套件 +
-端到端 + 界面检查）在 Bun 下同样通过**。
+```powershell
+run.cmd                      # 用当前目录当工作区
+run.cmd D:\my-project        # 指定 agent 干活的项目目录
+```
+```bash
+./run.sh ~/my-project
+```
 
-容器里跑的时候：
-
-- `/workspace` 是 agent 干活的项目目录（**挂载你自己的工作目录进去**）
-- `/data` 是持久化的会话/记忆/产物（用卷，删容器也不丢）
-- 容器本身就是隔离边界：文件工具被沙箱限制在 `/workspace` 内，越界路径和危险命令一律拒绝
-- 根文件系统只读 + `/tmp` 用内存 + 非 root 用户运行
-
-进来看看环境对不对：
+**要发给别人**（对方连下载运行时都不需要）：先在本机把 Bun 装进项目，再压缩整个目录发出去。
 
 ```bash
-docker run --rm -e CONTAINER_SELFCHECK=1 -v "$PWD:/workspace" mini-harness
+node scripts/setup-runtime.js --bundle   # 把本机 bun 复制进 runtime/
+node scripts/setup-runtime.js            # 或者直接下载官方发行版
+node scripts/setup-runtime.js --check    # 看当前状态
 ```
+
+**隔离**：文件工具被沙箱限制在工作区内（越界路径、绝对路径、危险命令全部拒绝），
+命令执行会清洗环境变量；工作区就是 `run.cmd` 第一个参数指定的目录，换目录就等于换一块地盘。
+
+想更严一层，就把 `APPROVAL_MODE=ask`（默认）留着——写文件和执行命令都要在界面上点「允许」。
 
 ## 数据存在哪 / 会不会丢
 
@@ -626,13 +612,17 @@ node scripts/markdown-test.js  # Markdown：65 条语法与安全断言 + 全特
 node scripts/agents-test.js    # 子代理：凭证继承 + 嵌套 trace + 执行视图（45 项）
 node scripts/workspace-test.js # 多工作区：CRUD / 会话归属 / 跨工作区拦截 / 记忆隔离 / 侧栏分组（43 项）
 node scripts/feishu-test.js    # 飞书通道：@ 识别 / 去重 / 会话映射 / 跨群聚合 / 回复分片 / 私聊隔离（73 项）
-node scripts/docker-check.js   # 容器配置：镜像/变量/挂载/entrypoint 一致性（44 项，不需要 Docker）
-node scripts/container-check.js # 容器内自检：工作区/数据目录/端口/沙箱边界/真跑一次工具（23 项）
+node scripts/run-check.js      # 启动脚本：编码/换行/运行顺序/资产表/SHA256 校验（35 项，不需要运行时）
+node scripts/runtime-check.js  # 环境自检：工作区/数据目录/端口/沙箱边界/真跑一次工具（23 项）
 ```
 
-容器相关的两个检查是分开的：`docker-check` 在**开发机上**跑（校验 Dockerfile / compose /
-entrypoint 与代码一致，抓「配置写错但 build 才发现」），`container-check` 在**容器里**跑
-（`docker run -e CONTAINER_SELFCHECK=1 ...` 会随启动自动执行）。
+`run-check` 专抓「换个平台就跑不起来」的坑：`run.cmd` 必须纯 ASCII（cmd.exe 按 OEM 代码页解析）、
+`.ps1` 必须带 UTF-8 BOM（PowerShell 5.1 没 BOM 会按 ANSI 读）、`.sh` 必须 LF。
+`runtime-check` 用来确认运行环境本身没问题：
+
+```bash
+node scripts/runtime-check.js       # 或者 run.cmd 起来后跑
+```
 
 上面所有套件都在 Node 和 Bun 下验证过（`bun scripts/harness-test.js` 同样通过）。
 
