@@ -46,7 +46,11 @@ export async function runTurn({
   let memoryHits = [];
   if (memory && depth === 0) {
     try {
-      const recalled = memory.recall(userText, { sessionId: session.id, topK: config.memoryTopK });
+      const recalled = memory.recall(userText, {
+        sessionId: session.id,
+        topK: config.memoryTopK,
+        workspaceId: session.workspaceId || 'default',
+      });
       memoryText = recalled.text;
       memoryHits = recalled.hits.map((h) => ({ id: h.item.id, score: h.score, content: h.item.content.slice(0, 80) }));
       if (memoryText) emit({ type: 'memory_recall', hits: memoryHits });
@@ -57,7 +61,21 @@ export async function runTurn({
 
   // modelConfig：本次请求实际使用的模型凭证（provider/model/baseUrl/apiKey）。
   // 子代理与工作流必须复用它，否则会退回服务端环境变量——前端填的 key 就丢了。
-  const ctx = { session, store, memory, agents, workflows, sandbox, modelConfig, emit, signal, config, depth };
+  // workspaceId：会话所属工作区，决定 workspace 级记忆的读写范围。
+  const ctx = {
+    session,
+    store,
+    memory,
+    agents,
+    workflows,
+    sandbox,
+    modelConfig,
+    emit,
+    signal,
+    config,
+    depth,
+    workspaceId: session.workspaceId || 'default',
+  };
 
   let steps = 0;
   let reason = 'stop';
@@ -78,6 +96,7 @@ export async function runTurn({
       // ---- 1. 组装上下文 ----
       const system = buildSystemPrompt({
         workspace: config.workspace,
+        workspaceName: config.workspaceName,
         tools: tools.enabled,
         approvalMode: session.approvalMode || config.approvalMode,
         model: session.model,

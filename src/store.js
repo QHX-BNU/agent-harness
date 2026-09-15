@@ -25,13 +25,15 @@ export class SessionStore {
     return path.join(this.dir, `${id}.events.jsonl`);
   }
 
-  create({ provider, model, approvalMode, title, kind = 'chat', parentId = null } = {}) {
+  create({ provider, model, approvalMode, title, kind = 'chat', parentId = null, workspaceId = 'default', workspacePath = null } = {}) {
     const id = crypto.randomUUID().slice(0, 8);
     const session = {
       id,
       title: title || '',
       kind,
       parentId,
+      workspaceId: workspaceId || 'default',
+      workspacePath: workspacePath || null,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       provider,
@@ -183,7 +185,7 @@ export class SessionStore {
     };
   }
 
-  list({ includeChildren = false } = {}) {
+  list({ includeChildren = false, workspaceId = null } = {}) {
     return fs
       .readdirSync(this.dir)
       .filter((f) => f.endsWith('.json'))
@@ -193,7 +195,20 @@ export class SessionStore {
       })
       .filter(Boolean)
       .filter((s) => includeChildren || s.kind !== 'subagent')
+      .filter((s) => !workspaceId || s.workspaceId === workspaceId)
       .sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  /** 每个工作区下的会话数（含子代理，用于侧栏计数） */
+  countByWorkspace() {
+    const out = {};
+    for (const f of fs.readdirSync(this.dir).filter((x) => x.endsWith('.json'))) {
+      const s = this.get(path.basename(f, '.json'));
+      if (!s) continue;
+      const w = s.workspaceId || 'default';
+      out[w] = (out[w] || 0) + 1;
+    }
+    return out;
   }
 
   // ---- 事件日志（trace） ----

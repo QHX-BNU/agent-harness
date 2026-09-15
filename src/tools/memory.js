@@ -31,6 +31,7 @@ export const memoryAdd = {
       importance: args.importance ?? 0.6,
       tags: args.tags || [],
       sessionId: ctx.session.id,
+      workspaceId: ctx.workspaceId, // workspace 级记忆归属于当前会话所在的工作区
     });
     ctx.emit?.({ type: 'memory', action: 'add', item });
     return `已记住 #${item.id} [${item.scope}/${item.category} 重要度${item.importance}] ${item.content}`;
@@ -58,6 +59,7 @@ export const memorySearch = {
       sessionId: ctx.session.id,
       includeSession: include_session !== false,
       recordLoad: true,
+      workspaceId: ctx.workspaceId,
     });
     if (!hits.length) return '没有找到相关记忆';
     return hits
@@ -87,6 +89,7 @@ export const memoryList = {
       category,
       keyword,
       limit: Number(limit) || 20,
+      workspaceId: ctx.workspaceId,
     });
     if (!items.length) return '记忆库为空（或没有匹配项）';
     return items

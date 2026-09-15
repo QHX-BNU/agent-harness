@@ -47,7 +47,7 @@ export class MemoryStore {
     fs.writeFileSync(this.file, JSON.stringify(this.items, null, 2), 'utf8');
   }
 
-  add({ content, scope = 'session', category = 'knowledge', importance = 0.6, tags = [], sessionId = null }) {
+  add({ content, scope = 'session', category = 'knowledge', importance = 0.6, tags = [], sessionId = null, workspaceId = null }) {
     if (!content || !String(content).trim()) throw new Error('记忆内容不能为空');
     if (!SCOPES.includes(scope)) throw new Error(`scope 必须是 ${SCOPES.join(' / ')}`);
     if (!CATEGORIES.includes(category)) throw new Error(`category 必须是 ${CATEGORIES.join(' / ')}`);
@@ -58,7 +58,8 @@ export class MemoryStore {
       category,
       importance: Math.max(0, Math.min(1, Number(importance) || 0.6)),
       tags: Array.isArray(tags) ? tags : String(tags || '').split(/[,，\s]+/).filter(Boolean),
-      workspace: scope === 'workspace' ? this.workspaceId : null,
+      // workspace 级记忆归属于某个工作区（多工作区时按会话所属工作区隔离）
+      workspace: scope === 'workspace' ? workspaceId || this.workspaceId : null,
       sessionId: scope === 'session' ? sessionId : null,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -95,10 +96,11 @@ export class MemoryStore {
   }
 
   /** 当前会话可见的记忆 */
-  visible({ sessionId = null, includeSession = true } = {}) {
+  visible({ sessionId = null, includeSession = true, workspaceId = null } = {}) {
+    const ws = workspaceId || this.workspaceId;
     return this.items.filter((m) => {
       if (m.scope === 'global') return true;
-      if (m.scope === 'workspace') return m.workspace === this.workspaceId;
+      if (m.scope === 'workspace') return m.workspace === ws;
       if (!includeSession) return false;
       return m.sessionId === sessionId;
     });
@@ -108,9 +110,9 @@ export class MemoryStore {
    * 检索：词元重叠 + 重要度 + 时效
    * @returns {Array<{item:object, score:number}>}
    */
-  search({ query = '', topK = 5, sessionId = null, includeSession = true, scope, category, tag, recordLoad = false }) {
+  search({ query = '', topK = 5, sessionId = null, includeSession = true, scope, category, tag, recordLoad = false, workspaceId = null }) {
     const q = tokenize(query);
-    let pool = this.visible({ sessionId, includeSession });
+    let pool = this.visible({ sessionId, includeSession, workspaceId });
     if (scope) pool = pool.filter((m) => m.scope === scope);
     if (category) pool = pool.filter((m) => m.category === category);
     if (tag) pool = pool.filter((m) => (m.tags || []).includes(tag));
@@ -136,8 +138,8 @@ export class MemoryStore {
     return scored;
   }
 
-  list({ sessionId = null, includeSession = true, scope, category, tag, keyword, limit = 50, offset = 0 } = {}) {
-    let pool = this.visible({ sessionId, includeSession });
+  list({ sessionId = null, includeSession = true, scope, category, tag, keyword, limit = 50, offset = 0, workspaceId = null } = {}) {
+    let pool = this.visible({ sessionId, includeSession, workspaceId });
     if (scope) pool = pool.filter((m) => m.scope === scope);
     if (category) pool = pool.filter((m) => m.category === category);
     if (tag) pool = pool.filter((m) => (m.tags || []).includes(tag));
@@ -149,8 +151,8 @@ export class MemoryStore {
   }
 
   /** 给系统提示用的召回文本（带预算截断） */
-  recall(query, { sessionId = null, topK = 5, maxChars = 2400 } = {}) {
-    const hits = this.search({ query, topK, sessionId, includeSession: false, recordLoad: true });
+  recall(query, { sessionId = null, topK = 5, maxChars = 2400, workspaceId = null } = {}) {
+    const hits = this.search({ query, topK, sessionId, includeSession: false, recordLoad: true, workspaceId });
     if (!hits.length) return { text: '', hits };
     const lines = [];
     let used = 0;

@@ -88,6 +88,8 @@ export function publicSession(session) {
     lastError: s.lastError || null,
     parentId: session.parentId || null,
     kind: session.kind || 'chat',
+    workspaceId: session.workspaceId || 'default',
+    workspace: session.workspacePath || null,
   };
 }
 

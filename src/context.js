@@ -2,7 +2,7 @@
 // 这是 harness 最容易被低估的部分——预算管理、记忆注入、系统提示共同决定上限。
 import { config } from './config.js';
 
-export function buildSystemPrompt({ workspace, tools, approvalMode, model, memoryText = '', todos = [], skills = [] }) {
+export function buildSystemPrompt({ workspace, workspaceName = '', tools, approvalMode, model, memoryText = '', todos = [], skills = [] }) {
   const byCat = tools.reduce((acc, t) => {
     (acc[t.category || 'other'] = acc[t.category || 'other'] || []).push(t);
     return acc;
@@ -19,7 +19,7 @@ export function buildSystemPrompt({ workspace, tools, approvalMode, model, memor
     `你是一个运行在 mini-harness 里的编码 agent。
 
 ## 环境
-- 工作区根目录: ${workspace}
+- 工作区${workspaceName ? `「${workspaceName}」` : ''}: ${workspace}
 - 模型: ${model}
 - 审批策略: ${approvalMode}（写文件 / 执行命令可能需要用户确认）
 - 当前时间: ${new Date().toISOString()}`,

@@ -13,7 +13,8 @@
         <div class="sidebar-head">
           <span class="logo">◈</span>
           <strong>mini-harness</strong>
-          <button id="newSession" class="icon-btn" title="新建会话">＋</button>
+          <button id="newWorkspace" class="icon-btn" title="新建工作区">⊞</button>
+          <button id="newSession" class="icon-btn" title="在当前工作区新建会话">＋</button>
         </div>
         <div id="sessionList" class="session-list"></div>
         <div class="sidebar-foot">
@@ -339,6 +340,36 @@
             <div id="agentEvents" class="trace-list tall"></div>
           </section>
         </div>
+      </div>
+    </div>
+
+    <!-- 新建工作区 -->
+    <div id="wsModal" class="modal" hidden>
+      <div class="modal-card narrow">
+        <header class="modal-head">
+          <strong>新建工作区</strong>
+          <span class="flex-1"></span>
+          <button id="wsCancel" class="icon-btn small">✕</button>
+        </header>
+        <div class="modal-body">
+          <p class="hint">
+            工作区就是 agent 的操作根目录：会话按工作区分组，文件工具、命令执行、「仅工作区」沙箱
+            都以它为界。目录必须已经存在。
+          </p>
+          <label class="field">
+            <span>名称</span>
+            <input id="wsName" placeholder="例如：我的项目（留空用目录名）" />
+          </label>
+          <label class="field">
+            <span>目录</span>
+            <input id="wsPath" placeholder="D:\work\my-project" spellcheck="false" />
+          </label>
+          <div class="hint" id="wsError" style="color: var(--err)"></div>
+        </div>
+        <footer class="modal-foot">
+          <span class="flex-1"></span>
+          <button id="wsCreate" class="primary">创建</button>
+        </footer>
       </div>
     </div>
 

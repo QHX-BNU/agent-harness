@@ -17,9 +17,13 @@
 |---|---|
 | ![子代理](docs/ui-agent.png) | ![嵌套](docs/ui-agent-trace.png) |
 
-| 沙箱 · 作用区域与自测 | Trace 面板 |
+| 工作区分组侧栏 | 沙箱 · 作用区域与自测 |
 |---|---|
-| ![沙箱](docs/ui-sandbox.png) | ![Trace 面板](docs/ui-trace-tab.png) |
+| ![工作区](docs/ui-workspaces.png) | ![沙箱](docs/ui-sandbox.png) |
+
+| Trace 面板 | 回收站与备份 |
+|---|---|
+| ![Trace 面板](docs/ui-trace-tab.png) | ![设置](docs/ui-settings.png) |
 
 
 ```
@@ -216,6 +220,37 @@ tool_result     task 成功
 - 内置 `code-review`（结构/风险/测试三路并行 → 汇总）和 `research`（现状/对比/坑 → 结论）。
 - 三种触发方式：对话里让模型调用 `run_workflow`、右侧面板点「运行」、`POST /api/workflows/run`。
 
+## 工作区：一个 harness，多个目录
+
+左栏按**工作区分组**，每个工作区下面是它自己的会话：
+
+```
+⊞ 新建工作区   ＋ 在当前工作区新建会话
+┌ 默认工作区 (7)                        ＋ ✎ ✕
+│   · 会话 A          ← 点工作区标题可折叠/展开
+│   · 会话 B
+├ 我的项目 (2)                          ＋ ✎ ✕
+│   · 重构任务
+└ 另一个仓库 (0)                        ＋ ✎ ✕
+    还没有会话，点 ＋ 新建
+```
+
+一个工作区就是 **agent 的操作根目录**，它同时决定三件事：
+
+| 受影响的 | 怎么变 |
+|---|---|
+| 文件工具 | `list_dir / read_file / write_file / edit_file / glob / grep` 的根目录 = 该工作区路径 |
+| 沙箱 | 「仅工作区」作用区域的实际范围 = 该工作区；跨工作区读写会被拦（相对路径穿越、绝对路径都拦） |
+| 记忆 | `workspace` 级记忆按工作区隔离，A 工作区记的东西不会出现在 B 工作区的召回里 |
+
+子代理归属同一个工作区（文件工具与记忆都跟着走）。
+
+**操作方式**：顶部 `⊞` 新建工作区（填名称 + 已存在的目录，目录不存在会明确报错）；
+在每个工作区标题上悬停，出现 `＋`（在该工作区新建会话）、`✎`（重命名）、`✕`（从列表移除，
+不删磁盘目录 —— 如果它下面还有会话会被拦下）。默认工作区指向服务启动时的 workspace，不能删。
+
+配置存在 `.workspaces.json`，会话记录自己的 `workspaceId`。历史会话没有这个字段时按默认工作区处理。
+
 ## 数据存在哪 / 会不会丢
 
 会话、trace、记忆、产物全部落在工作区目录下，**服务重启不会丢**：
@@ -331,13 +366,15 @@ Invoke-WebRequest 'http://127.0.0.1:5175/api/sessions/export' -OutFile "backup-$
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| GET/POST | `/api/workspaces` | 工作区列表（带会话数）/ 新建 |
+| PATCH/DELETE | `/api/workspaces/:id` | 重命名 / 移除（有会话时拒绝） |
 | GET | `/api/config` `/api/providers` `/api/tools` `/api/workflows` | 系统信息 |
 | POST | `/api/probe` | 真实打一次模型接口（可带 `apiKey`/`baseUrl`/`model`），返回延迟/用量/工具支持/模型列表 |
 | POST | `/api/tools/:name/toggle` | 启用/禁用工具 |
 | GET | `/api/sandbox` | 作用区域预设 / 权限 / 后端可用性 / 当前默认配置 |
 | POST | `/api/sandbox/test` | 拿一组配置跑 8 条固定用例，返回放行/拒绝结果 |
 | GET | `/api/sessions/:id/sandbox` | 该会话生效的沙箱配置 + 拒绝记录 |
-| GET/POST | `/api/sessions` | 列表 / 新建 |
+| GET/POST | `/api/sessions` | 列表（可 `?workspaceId=` 过滤）/ 新建（带 `workspaceId`） |
 | GET/DELETE | `/api/sessions/:id` | 详情 / 删除（默认软删除进回收站，`?hard=1` 才真删） |
 | GET | `/api/sessions/trash` | 回收站列表 |
 | POST | `/api/sessions/trash/:trashId/restore` | 从回收站恢复（含 trace） |
@@ -369,6 +406,7 @@ node scripts/trace-test.js     # Trace：事件记录 → 标签页/弹窗查看
 node scripts/sandbox-test.js   # 沙箱：作用区域/权限/命令扫描/环境清洗/后端/审计/界面（76 项）
 node scripts/markdown-test.js  # Markdown：65 条语法与安全断言 + 全特性渲染截图
 node scripts/agents-test.js    # 子代理：凭证继承 + 嵌套 trace + 执行视图（45 项）
+node scripts/workspace-test.js # 多工作区：CRUD / 会话归属 / 跨工作区拦截 / 记忆隔离 / 侧栏分组（43 项）
 ```
 
 `scripts/cdp.js` 是共享的浏览器驱动（Node 24 自带 WebSocket，零依赖），

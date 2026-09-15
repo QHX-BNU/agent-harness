@@ -12,7 +12,7 @@
   const post = (url, body) =>
     api(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
 
-  const state = { sessionId: null, sessions: [] };
+  const state = { sessionId: null, sessions: [], workspaces: [], activeWorkspace: 'default', collapsed: new Set() };
 
   const relTime = (ts) => {
     const d = Date.now() - (ts || 0);
@@ -22,41 +22,160 @@
     return new Date(ts).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
   };
 
-  // ---------- 左侧会话列表 ----------
+  // ---------- 左侧：工作区分组 + 会话 ----------
+  function sessionItem(s) {
+    const item = document.createElement('div');
+    item.className = `session-item${s.id === state.sessionId ? ' active' : ''}`;
+    item.innerHTML = `
+      <span class="dot-status ${s.status}"></span>
+      <span class="body"><span class="title"></span><span class="sub"></span></span>
+      <span class="del">✕</span>`;
+    item.querySelector('.title').textContent = s.title || s.id;
+    item.querySelector('.sub').textContent = `${relTime(s.updatedAt)} · ${s.messages} 条`;
+    item.title = `${s.id} · ${s.model || ''} · ${s.status} · 工作区 ${s.workspaceId}`;
+    item.onclick = async (e) => {
+      if (e.target.classList.contains('del')) {
+        const r = await api(`/api/sessions/${s.id}`, { method: 'DELETE' });
+        if (state.sessionId === s.id) window.Chat?.reset();
+        refreshSessions();
+        showToast(`「${s.title || s.id}」已移入回收站`, '撤销', async () => {
+          if (r?.trashId) await post(`/api/sessions/trash/${encodeURIComponent(r.trashId)}/restore`);
+          refreshSessions();
+        });
+        return;
+      }
+      state.activeWorkspace = s.workspaceId || 'default';
+      await window.Chat?.loadSession(s.id);
+      refreshSessions();
+    };
+    return item;
+  }
+
   async function refreshSessions() {
     try {
-      state.sessions = await api('/api/sessions');
+      const [sessions, ws] = await Promise.all([api('/api/sessions'), api('/api/workspaces')]);
+      state.sessions = sessions;
+      state.workspaces = ws.items || [];
     } catch {
       return;
     }
+    // 当前会话所属工作区高亮；没有会话时保持原样
+    const current = state.sessions.find((s) => s.id === state.sessionId);
+    if (current) state.activeWorkspace = current.workspaceId || 'default';
+
     const box = $('sessionList');
     box.innerHTML = '';
-    for (const s of state.sessions) {
-      const item = document.createElement('div');
-      item.className = `session-item${s.id === state.sessionId ? ' active' : ''}`;
-      item.innerHTML = `
-        <span class="dot-status ${s.status}"></span>
-        <span class="body"><span class="title"></span><span class="sub"></span></span>
-        <span class="del">✕</span>`;
-      item.querySelector('.title').textContent = s.title || s.id;
-      item.querySelector('.sub').textContent = `${relTime(s.updatedAt)} · ${s.messages} 条`;
-      item.title = `${s.id} · ${s.model || ''} · ${s.status}`;
-      item.onclick = async (e) => {
-        if (e.target.classList.contains('del')) {
-          const r = await api(`/api/sessions/${s.id}`, { method: 'DELETE' });
-          if (state.sessionId === s.id) window.Chat?.reset();
-          refreshSessions();
-          // 软删除：给一次撤销的机会
-          showToast(`「${s.title || s.id}」已移入回收站`, '撤销', async () => {
-            if (r?.trashId) await post(`/api/sessions/trash/${encodeURIComponent(r.trashId)}/restore`);
-            refreshSessions();
-          });
+
+    for (const w of state.workspaces) {
+      const list = state.sessions.filter((s) => (s.workspaceId || 'default') === w.id);
+      const group = document.createElement('div');
+      group.className = `ws-group${w.id === state.activeWorkspace ? ' active' : ''}`;
+
+      const head = document.createElement('div');
+      head.className = 'ws-head';
+      head.innerHTML = `
+        <span class="caret">${state.collapsed.has(w.id) ? '▸' : '▾'}</span>
+        <span class="ws-name"></span>
+        <span class="ws-count">${list.length}</span>
+        <span class="ws-actions">
+          <button class="ws-btn add" title="在这个工作区新建会话">＋</button>
+          ${w.id === 'default' ? '' : '<button class="ws-btn rename" title="重命名">✎</button><button class="ws-btn rm" title="删除工作区">✕</button>'}
+        </span>`;
+      head.querySelector('.ws-name').textContent = w.name;
+      head.title = `${w.path}${w.exists ? '' : '（目录不存在）'}`;
+      if (!w.exists) head.querySelector('.ws-name').classList.add('missing');
+      head.onclick = (e) => {
+        const btn = e.target.closest('.ws-btn');
+        if (btn) {
+          e.stopPropagation();
+          if (btn.classList.contains('add')) return newSessionIn(w.id);
+          if (btn.classList.contains('rename')) return renameWorkspace(w);
+          if (btn.classList.contains('rm')) return removeWorkspace(w);
           return;
         }
-        await window.Chat?.loadSession(s.id);
+        state.activeWorkspace = w.id;
+        state.collapsed.has(w.id) ? state.collapsed.delete(w.id) : state.collapsed.add(w.id);
         refreshSessions();
       };
-      box.append(item);
+      group.append(head);
+
+      if (!state.collapsed.has(w.id)) {
+        const wrap = document.createElement('div');
+        wrap.className = 'ws-sessions';
+        if (!list.length) {
+          const empty = document.createElement('div');
+          empty.className = 'ws-empty dim';
+          empty.textContent = '还没有会话，点 ＋ 新建';
+          wrap.append(empty);
+        }
+        for (const s of list) wrap.append(sessionItem(s));
+        group.append(wrap);
+      }
+      box.append(group);
+    }
+  }
+
+  /** 在当前（或指定）工作区里新建会话 */
+  async function newSessionIn(workspaceId) {
+    const wid = workspaceId || state.activeWorkspace || 'default';
+    const created = await post('/api/sessions', { workspaceId: wid });
+    state.activeWorkspace = wid;
+    await window.Chat?.loadSession(created.id);
+    refreshSessions();
+    showToast(`已在「${state.workspaces.find((w) => w.id === wid)?.name || wid}」新建会话`);
+    return created;
+  }
+
+  function openWsModal() {
+    $('wsError').textContent = '';
+    $('wsName').value = '';
+    $('wsPath').value = '';
+    $('wsModal').hidden = false;
+    setTimeout(() => $('wsName').focus(), 30);
+  }
+  const closeWsModal = () => ($('wsModal').hidden = true);
+
+  async function createWorkspace() {
+    const name = $('wsName').value.trim();
+    const path = $('wsPath').value.trim();
+    if (!path) {
+      $('wsError').textContent = '目录不能为空';
+      return;
+    }
+    try {
+      const w = await post('/api/workspaces', { name, path });
+      closeWsModal();
+      state.activeWorkspace = w.id;
+      await refreshSessions();
+      showToast(`已添加工作区「${w.name}」`);
+    } catch (err) {
+      $('wsError').textContent = err.message;
+    }
+  }
+
+  async function renameWorkspace(w) {
+    const name = prompt(`工作区重命名（当前：${w.name}）`, w.name);
+    if (name === null || !name.trim()) return;
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(w.id)}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      refreshSessions();
+    } catch (err) {
+      showToast(`重命名失败：${err.message}`);
+    }
+  }
+
+  async function removeWorkspace(w) {
+    if (!confirm(`删除工作区「${w.name}」？\n（只是从列表移除，不会删磁盘上的目录）`)) return;
+    try {
+      await api(`/api/workspaces/${encodeURIComponent(w.id)}`, { method: 'DELETE' });
+      if (state.activeWorkspace === w.id) state.activeWorkspace = 'default';
+      refreshSessions();
+    } catch (err) {
+      showToast(`删除失败：${err.message}`);
     }
   }
 
@@ -346,9 +465,21 @@
       if (e.key === 'Enter') refreshMemory($('memSearch').value.trim());
     };
     $('newSession').onclick = async () => {
-      await window.Chat?.newSession();
-      refreshSessions();
+      // 顶部 ＋ ：在当前工作区里新建会话
+      await newSessionIn(state.activeWorkspace);
     };
+    $('newWorkspace')?.addEventListener('click', openWsModal);
+    $('wsCreate')?.addEventListener('click', createWorkspace);
+    $('wsCancel')?.addEventListener('click', closeWsModal);
+    $('wsModal')?.addEventListener('click', (e) => {
+      if (e.target === $('wsModal')) closeWsModal();
+    });
+    $('wsPath')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') createWorkspace();
+    });
+    $('wsName')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') $('wsPath').focus();
+    });
     $('backupSessions')?.addEventListener('click', backupAll);
     $('purgeTrash')?.addEventListener('click', async () => {
       const { items } = await api('/api/sessions/trash');
@@ -392,6 +523,8 @@
     refreshTools,
     refreshWorkflows,
     refreshTrash,
+    newSessionIn,
+    openWsModal,
     showToast,
     renderState,
     renderTodos,

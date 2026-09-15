@@ -13,6 +13,7 @@ import { ApprovalBroker, Policy } from './src/policy.js';
 import { createToolRegistry } from './src/tools/index.js';
 import { createAgentRunner } from './src/agents.js';
 import { createWorkflowEngine } from './src/workflow.js';
+import { WorkspaceStore, DEFAULT_WORKSPACE_ID } from './src/workspaces.js';
 import { createProvider, listProviders, resolveProviderConfig } from './src/providers/index.js';
 import { createSandbox, SCOPE_PRESETS, MODES, backendAvailable } from './src/sandbox.js';
 import { runTurn } from './src/loop.js';
@@ -28,6 +29,11 @@ const store = new SessionStore({
   dir: config.sessionsDir,
   artifactsDir: config.artifactsDir,
   trashDir: config.trashDir,
+});
+// 工作区：默认工作区指向服务启动时的 workspace
+const workspaces = new WorkspaceStore({
+  file: path.join(config.sessionsDir, '..', '.workspaces.json'),
+  defaultPath: config.workspace,
 });
 const memory = new MemoryStore({ dir: config.memoryDir, workspaceId: config.workspace });
 const broker = new ApprovalBroker(config.approvalTimeoutMs);
@@ -134,7 +140,7 @@ function sandboxCatalog() {
 }
 
 /** 合并「请求 > 会话 > 服务端默认」得到本次生效的沙箱 */
-function buildSandbox(session, requested = {}, emit = null) {
+function buildSandbox(session, requested = {}, emit = null, workspacePath = null) {
   const base = config.sandbox || {};
   const stored = session.sandboxConfig || {};
   const merged = { ...base, ...stored, ...requested };
@@ -143,7 +149,8 @@ function buildSandbox(session, requested = {}, emit = null) {
     customRoots: merged.customRoots,
     mode: merged.mode,
     backend: merged.backend,
-    workspace: config.workspace,
+    // 「仅工作区」的作用范围 = 这个会话所属工作区的目录
+    workspace: workspacePath || config.workspace,
     strict: merged.strict !== false,
     image: merged.image,
     network: merged.network,
@@ -208,8 +215,26 @@ async function handleChat(req, res) {
   const wantProvider = body.provider || config.provider;
   const wantModel = body.model || (wantProvider === config.provider ? config.model : '') || undefined;
 
-  if (!session) session = store.create({ provider: wantProvider, model: wantModel, approvalMode });
+  // 工作区：会话属于哪个工作区，决定了文件工具的根目录 / 沙箱范围 / workspace 级记忆
+  const ws = workspaces.get(body.workspaceId || session?.workspaceId || 'default') || workspaces.get('default');
+  if (ws) workspaces.touch(ws.id);
+
+  if (!session) {
+    session = store.create({
+      provider: wantProvider,
+      model: wantModel,
+      approvalMode,
+      workspaceId: ws?.id || 'default',
+      workspacePath: ws?.path || config.workspace,
+    });
+  }
   session.approvalMode = approvalMode;
+  if (ws) {
+    session.workspaceId = ws.id;
+    session.workspacePath = ws.path;
+  }
+  // 本轮生效的配置：工作区路径覆盖全局默认
+  const turnConfig = { ...config, workspace: ws?.path || config.workspace, workspaceName: ws?.name || '' };
 
   if (running.has(session.id)) {
     return json(res, 409, { error: `会话 ${session.id} 正在处理上一轮请求，先中止或开新会话` });
@@ -241,10 +266,10 @@ async function handleChat(req, res) {
     rawEmit(ev);
   };
 
-  const sandbox = buildSandbox(session, body.sandbox || {}, emit);
+  const sandbox = buildSandbox(session, body.sandbox || {}, emit, ws?.path);
   store.save(session);
 
-  emit({ type: 'session', sessionId: session.id, approvalMode, provider: provider.id, model: provider.model });
+  emit({ type: 'session', sessionId: session.id, approvalMode, provider: provider.id, model: provider.model, workspaceId: session.workspaceId });
   emit({ type: 'model', provider: provider.id, model: provider.model, protocol: provider.protocol, baseUrl: provider.baseUrl });
   emit({ type: 'sandbox', ...sandbox.describe() });
   if (session.todos?.length) emit({ type: 'todos', todos: session.todos });
@@ -258,7 +283,7 @@ async function handleChat(req, res) {
       policy: new Policy(approvalMode, broker),
       store,
       emit: rawEmit,
-      config,
+      config: turnConfig,
       signal: controller.signal,
       memory: config.memoryEnabled ? memory : null,
       agents,
@@ -287,6 +312,7 @@ async function handleWorkflowRun(req, res) {
   const name = String(body.name || '').trim();
   if (!name) return json(res, 400, { error: 'name 不能为空' });
 
+  const wfWs = workspaces.get(body.workspaceId || store.get(body.sessionId)?.workspaceId || 'default') || workspaces.get('default');
   const session = body.sessionId
     ? store.get(body.sessionId)
     : store.create({
@@ -294,8 +320,11 @@ async function handleWorkflowRun(req, res) {
         model: body.model || config.model,
         approvalMode: 'auto',
         title: `[工作流] ${name}`,
+        workspaceId: wfWs?.id || 'default',
+        workspacePath: wfWs?.path || config.workspace,
       });
   if (running.has(session.id)) return json(res, 409, { error: `会话 ${session.id} 忙` });
+  if (wfWs) workspaces.touch(wfWs.id);
 
   const { emit: rawEmit, signal, close } = openSSE(req, res, session.id);
   const controller = new AbortController();
@@ -310,7 +339,7 @@ async function handleWorkflowRun(req, res) {
 
   emit({ type: 'session', sessionId: session.id, kind: 'workflow', name });
 
-  const sandbox = buildSandbox(session, body.sandbox || {}, emit);
+  const sandbox = buildSandbox(session, body.sandbox || {}, emit, wfWs?.path);
   emit({ type: 'sandbox', ...sandbox.describe() });
 
   try {
@@ -410,9 +439,39 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, name: decodeURIComponent(seg[2]), enabled });
     }
 
+    // --- 工作区 ---
+    if (req.method === 'GET' && p === '/api/workspaces') {
+      return json(res, 200, { items: workspaces.describe(store.countByWorkspace()), defaultPath: config.workspace });
+    }
+    if (req.method === 'POST' && p === '/api/workspaces') {
+      const body = await readBody(req);
+      try {
+        return json(res, 201, workspaces.create({ name: body.name, path: body.path }));
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (seg[1] === 'workspaces' && seg[2] && (req.method === 'PATCH' || req.method === 'DELETE')) {
+      const wid = decodeURIComponent(seg[2]);
+      try {
+        if (req.method === 'PATCH') return json(res, 200, { ok: true, workspace: workspaces.update(wid, await readBody(req)) });
+        // 删工作区不删会话：如果它下面还有会话，先拦下来（避免会话变成孤儿）
+        const count = store.list({ includeChildren: true, workspaceId: wid }).length;
+        if (count > 0) {
+          return json(res, 400, { error: `这个工作区下还有 ${count} 个会话，先删掉或移走再删工作区` });
+        }
+        return json(res, 200, { ok: true, workspace: workspaces.remove(wid) });
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+
     // --- 会话 ---
     if (req.method === 'GET' && p === '/api/sessions') {
-      return json(res, 200, store.list({ includeChildren: url.searchParams.get('children') === '1' }));
+      return json(res, 200, store.list({
+        includeChildren: url.searchParams.get('children') === '1',
+        workspaceId: url.searchParams.get('workspaceId') || null,
+      }));
     }
     // 备份：把所有会话（含事件）打包成一个 JSON 下载
     if (req.method === 'GET' && p === '/api/sessions/export') {
@@ -437,13 +496,17 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && p === '/api/sessions') {
       const body = await readBody(req);
+      const ws = workspaces.get(body.workspaceId || DEFAULT_WORKSPACE_ID) || workspaces.get(DEFAULT_WORKSPACE_ID);
       const s = store.create({
         provider: body.provider || config.provider,
         model: body.model || config.model,
         approvalMode: body.approvalMode || config.approvalMode,
         title: body.title,
+        workspaceId: ws?.id || 'default',
+        workspacePath: ws?.path || config.workspace,
       });
-      return json(res, 201, { id: s.id, title: s.title, status: s.state.status });
+      if (ws) workspaces.touch(ws.id);
+      return json(res, 201, { id: s.id, title: s.title, status: s.state.status, workspaceId: s.workspaceId });
     }
     if (seg[1] === 'sessions' && seg[2]) {
       const id = seg[2];
@@ -494,6 +557,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         items: memory.list({
           sessionId: url.searchParams.get('sessionId'),
+          workspaceId: url.searchParams.get('workspaceId') || undefined,
           includeSession: url.searchParams.get('includeSession') !== '0',
           scope: url.searchParams.get('scope') || undefined,
           category: url.searchParams.get('category') || undefined,
@@ -511,6 +575,7 @@ const server = http.createServer(async (req, res) => {
         query: body.query || '',
         topK: body.topK || 8,
         sessionId: body.sessionId,
+        workspaceId: body.workspaceId,
         includeSession: body.includeSession !== false,
         recordLoad: Boolean(body.recordLoad),
       }));

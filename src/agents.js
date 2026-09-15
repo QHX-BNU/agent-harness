@@ -64,6 +64,9 @@ export function createAgentRunner({ config, store, tools, memory, createProvider
         title: `[子代理] ${description}`,
         kind: 'subagent',
         parentId: parent?.id || null,
+        // 子代理归属同一个工作区（文件工具与 workspace 级记忆都跟着走）
+        workspaceId: parent?.workspaceId || 'default',
+        workspacePath: parent?.workspacePath || null,
       });
 
       let provider;
