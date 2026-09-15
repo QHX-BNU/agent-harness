@@ -49,7 +49,7 @@
 | 记忆 | `src/memory.js` | 分层（global/workspace/session）、词元重叠+重要度+时效检索、自动召回、加载统计 |
 | 工具 | `src/tools/` | 7 类 15 个内置工具、注册/启用开关、统一错误归一化、ctx 注入 |
 | 策略 | `src/policy.js` | 按类别判定 allow/ask/deny、危险命令硬拦、异步审批 broker（超时=拒绝） |
-| 子代理 | `src/agents.js` | 独立上下文派生、并发上限、递归深度限制、结论回传 |
+| 子代理 | `src/agents.js` | 独立上下文派生、并发上限、递归深度限制、结论回传、**请求级凭证继承** |
 | 工作流 | `src/workflow.js` | JSON 定义、阶段串行/阶段内并行、`{{input}}`/`{{prev}}`/`{{steps.x}}` 模板 |
 | **沙箱** | `src/sandbox.js` | 作用区域（工作区/主目录/自定义/全盘）、只读模式、命令扫描、环境变量清洗、审计、docker/wsl 后端 |
 | 持久化 | `src/store.js` | 会话 JSON + 事件 JSONL + 产物文件，可恢复、可回放 |
@@ -141,7 +141,14 @@ category: anchor / structure / knowledge / situation / self
 - **递归深度上限** `MAX_AGENT_DEPTH`（默认 2），超了直接拒绝；
 - **并发上限** `MAX_CONCURRENT_AGENTS`（默认 3），排队执行；
 - 子代理内部按 `auto` 跑（它无人可问），所以策略层把审批点放在**委派本身**上：
-  `ask` 模式下，`task`/`run_workflow` 需要你点一次允许，之后子代理自主执行。
+  `ask` 模式下，`task`/`run_workflow` 需要你点一次允许，之后子代理自主执行；
+- **模型凭证从「本次请求」继承**：前端设置里填的 `provider / model / baseUrl / apiKey` 会原样传给
+  子代理与工作流的每一步，不会退回服务端环境变量。凭证来源优先级
+  `请求 modelConfig > 父会话记录 > 服务端环境变量`，`subagent_start` 事件里带
+  `credentialSource` 字段（`request` / `server-env`），界面上会显示成「凭证 本次请求」。
+  key 只在内存里流转，**不落盘**。
+- 子代理同样继承**沙箱**（作用区域只能收紧不能放宽）与工具注册表；记忆则只在主对话自动召回，
+  子代理需要时自己用 `memory_*` 工具查。
 
 ## 工作流
 
@@ -285,6 +292,7 @@ node scripts/ui-key-test.js    # 界面填 API key 专项：填 key → 测试�
 node scripts/trace-test.js     # Trace：事件记录 → 标签页/弹窗查看 → 三种格式导出（29 项）
 node scripts/sandbox-test.js   # 沙箱：作用区域/权限/命令扫描/环境清洗/后端/审计/界面（76 项）
 node scripts/markdown-test.js  # Markdown：65 条语法与安全断言 + 全特性渲染截图
+node scripts/agents-test.js    # 子代理：凭证继承（复现「前端配了 key 子代理却报缺 key」并锁死）
 ```
 
 `scripts/cdp.js` 是共享的浏览器驱动（Node 24 自带 WebSocket，零依赖），

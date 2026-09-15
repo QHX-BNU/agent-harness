@@ -260,6 +260,13 @@ async function handleChat(req, res) {
       agents,
       workflows,
       sandbox,
+      // 本次请求实际用的凭证，子代理/工作流必须继承（否则会退回服务端环境变量）
+      modelConfig: {
+        provider: provider.id,
+        model: provider.model,
+        baseUrl: body.baseUrl || config.baseUrl || undefined,
+        apiKey: body.apiKey || config.apiKey || undefined,
+      },
       depth: 0,
     });
   } catch (err) {
@@ -278,7 +285,12 @@ async function handleWorkflowRun(req, res) {
 
   const session = body.sessionId
     ? store.get(body.sessionId)
-    : store.create({ provider: config.provider, model: config.model, approvalMode: 'auto', title: `[工作流] ${name}` });
+    : store.create({
+        provider: body.provider || config.provider,
+        model: body.model || config.model,
+        approvalMode: 'auto',
+        title: `[工作流] ${name}`,
+      });
   if (running.has(session.id)) return json(res, 409, { error: `会话 ${session.id} 忙` });
 
   const { emit: rawEmit, signal, close } = openSSE(req, res, session.id);
@@ -304,6 +316,13 @@ async function handleWorkflowRun(req, res) {
       emit,
       signal: controller.signal,
       sandbox,
+      // 工作流的每一步都是子代理，同样要继承本次请求的凭证
+      modelConfig: {
+        provider: body.provider || session.provider || config.provider,
+        model: body.model || session.model || config.model,
+        baseUrl: body.baseUrl || config.baseUrl || undefined,
+        apiKey: body.apiKey || config.apiKey || undefined,
+      },
     });
     store.append(session, { role: 'assistant', content: result.summary });
     emit({ type: 'assistant_message', content: result.summary });

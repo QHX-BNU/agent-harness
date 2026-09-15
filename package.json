@@ -20,6 +20,7 @@
     "ui-key-test": "node scripts/ui-key-test.js",
     "trace-test": "node scripts/trace-test.js",
     "sandbox-test": "node scripts/sandbox-test.js",
-    "markdown-test": "node scripts/markdown-test.js"
+    "markdown-test": "node scripts/markdown-test.js",
+    "agents-test": "node scripts/agents-test.js"
   }
 }

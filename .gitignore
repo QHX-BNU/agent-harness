@@ -1,13 +1,17 @@
 # 会话与状态
 .sessions/
+.sessions-test/
 .artifacts/
+.artifacts-test/
 .memory/
+.sandbox-tmp/
 
 # 测试产物
 e2e/
 ui-check/
 demo/
 out/
+trace/
 
 node_modules/
 *.log

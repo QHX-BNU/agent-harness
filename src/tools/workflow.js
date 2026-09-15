@@ -21,6 +21,7 @@ export const runWorkflow = {
       emit: ctx.emit,
       signal: ctx.signal,
       sandbox: ctx.sandbox,
+      modelConfig: ctx.modelConfig, // 同上：工作流每一步都是子代理，凭证必须一起传下去
     });
     return run.summary;
   },

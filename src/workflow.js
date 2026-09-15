@@ -44,9 +44,10 @@ export function createWorkflowEngine({ dir, agents, config }) {
     /**
      * 执行工作流
      * @param {string} name
-     * @param {{input?:string, session:object, emit?:Function, signal?:AbortSignal}} opts
+     * @param {{input?:string, session:object, emit?:Function, signal?:AbortSignal,
+     *          sandbox?:object, modelConfig?:object}} opts
      */
-    async run(name, { input = '', session, emit, signal, sandbox = null } = {}) {
+    async run(name, { input = '', session, emit, signal, sandbox = null, modelConfig = null } = {}) {
       const def = this.get(name);
       if (!def) throw new Error(`没有名为 "${name}" 的工作流（用 workflow_list 查看可用的）`);
       if (!agents) throw new Error('当前环境没有启用子代理，工作流无法运行');
@@ -77,6 +78,7 @@ export function createWorkflowEngine({ dir, agents, config }) {
                 maxSteps: step.maxSteps || 6,
                 parent: session,
                 depth: 1,
+                modelConfig,
                 signal,
                 emit,
                 sandbox,

@@ -31,36 +31,70 @@ export function createAgentRunner({ config, store, tools, memory, createProvider
       return running;
     },
 
-    async run({ description = '子任务', prompt, model, maxSteps = 8, parent, depth = 1, emit, signal, onDelta, sandbox = null }) {
+    async run({
+      description = '子任务',
+      prompt,
+      model,
+      maxSteps = 8,
+      parent,
+      depth = 1,
+      emit,
+      signal,
+      onDelta,
+      sandbox = null,
+      modelConfig = null,
+    }) {
       if (!prompt || !String(prompt).trim()) throw new Error('子任务 prompt 不能为空');
       if (depth > config.maxAgentDepth) {
         throw new Error(`子代理递归深度超过上限 ${config.maxAgentDepth}（子代理不能再无限制地派生下去）`);
       }
 
+      // 凭证来源优先级：本次请求的 modelConfig（前端设置里填的 key）> 父会话记录 > 服务端环境变量。
+      // 少了第一项，子代理就会退回环境变量——前端配的 key 等于没配，这正是必须继承的原因。
+      const cred = modelConfig || {};
+      const providerId = cred.provider || parent?.provider || config.provider;
+      const modelId = model || cred.model || parent?.model || config.model;
+      const credentialSource = cred.apiKey ? 'request' : cred.baseUrl ? 'request(baseUrl only)' : 'server-env';
+
       await acquire();
       const child = store.create({
-        provider: parent?.provider || config.provider,
-        model: model || parent?.model || config.model,
+        provider: providerId,
+        model: modelId,
         approvalMode: 'auto', // 子代理无人可问，写/执行类工具自动放行（父级的策略已放行委派本身）
         title: `[子代理] ${description}`,
         kind: 'subagent',
         parentId: parent?.id || null,
       });
 
-      const provider = createProvider({
-        provider: child.provider,
-        model: child.model,
-        baseUrl: config.baseUrl,
-        apiKey: config.apiKey,
-        timeoutMs: config.modelTimeoutMs,
-        retries: config.modelRetries,
-      });
+      let provider;
+      try {
+        provider = createProvider({
+          provider: providerId,
+          model: modelId,
+          baseUrl: cred.baseUrl, // undefined 时自动回落环境变量 / 厂商预设
+          apiKey: cred.apiKey,
+          timeoutMs: config.modelTimeoutMs,
+          retries: config.modelRetries,
+        });
+        child.model = provider.model;
+        child.provider = provider.id;
+        store.save(child);
+      } catch (err) {
+        release();
+        throw new Error(
+          `子代理无法建立模型连接（${providerId} · ${modelId}）：${err.message}\n` +
+            `凭证来源：${credentialSource}。子代理会继承本次请求的 provider/model/baseUrl/apiKey，` +
+            `若 key 只配在环境变量里，请设置对应的 *_API_KEY。`,
+        );
+      }
 
       emit?.({
         type: 'subagent_start',
         agentId: child.id,
         description,
         model: child.model,
+        provider: child.provider,
+        credentialSource,
         depth,
       });
 

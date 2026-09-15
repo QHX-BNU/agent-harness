@@ -61,7 +61,11 @@ export function startFakeLLM({ port = 0, host = '127.0.0.1' } = {}) {
     const fileMatch = userText.match(/([\w./-]+\.[a-zA-Z0-9]+)/);
     let toolName = 'list_dir';
     let toolArgs = { path: './src' };
-    if (/(写|创建|write|新建)/i.test(userText)) {
+    if (/(委派|子任务|subagent|\btask\b)/i.test(userText)) {
+      // 触发子代理链路：假模型调用 task 工具，子代理再走一轮
+      toolName = 'task';
+      toolArgs = { description: '探查', prompt: '读一下 package.json 并总结' };
+    } else if (/(写|创建|write|新建)/i.test(userText)) {
       toolName = 'write_file';
       toolArgs = { path: fileMatch ? fileMatch[1] : 'fake/out.txt', content: '由假模型写入\n' };
     } else if (/(运行|执行|命令|shell|run)/i.test(userText)) {

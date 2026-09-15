@@ -29,6 +29,7 @@ export const task = {
       emit: ctx.emit,
       signal: ctx.signal,
       sandbox: ctx.sandbox,
+      modelConfig: ctx.modelConfig, // 继承本次请求的 key/端点，否则前端填的 key 会丢
     });
     return result.summary;
   },

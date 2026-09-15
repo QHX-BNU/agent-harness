@@ -23,6 +23,7 @@ export async function runTurn({
   agents = null,
   workflows = null,
   sandbox = null,
+  modelConfig = null,
   depth = 0,
 }) {
   // trace 由 loop 自己负责持久化：任何入口（HTTP / CLI / 子代理）跑一轮都会留下事件日志
@@ -54,7 +55,9 @@ export async function runTurn({
     }
   }
 
-  const ctx = { session, store, memory, agents, workflows, sandbox, emit, signal, config, depth };
+  // modelConfig：本次请求实际使用的模型凭证（provider/model/baseUrl/apiKey）。
+  // 子代理与工作流必须复用它，否则会退回服务端环境变量——前端填的 key 就丢了。
+  const ctx = { session, store, memory, agents, workflows, sandbox, modelConfig, emit, signal, config, depth };
 
   let steps = 0;
   let reason = 'stop';

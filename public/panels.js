@@ -214,13 +214,16 @@
     const input = $('wfInput').value.trim();
     window.Chat?.reset({ keepSession: false });
     setStatus('running');
+    // 工作流每一步都是子代理，必须带上当前配置的模型凭证（否则会退回服务端环境变量）
+    const payload = window.Chat?.requestPayload?.({ name, input }) || { name, input };
     const res = await fetch('/api/workflows/run', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name, input }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok || !res.body) {
-      window.Chat?.addBubble('error', `工作流启动失败：HTTP ${res.status}`);
+      const info = await res.json().catch(() => ({}));
+      window.Chat?.addBubble('error', `工作流启动失败：HTTP ${res.status} ${info.error || ''}`);
       return;
     }
     const reader = res.body.getReader();

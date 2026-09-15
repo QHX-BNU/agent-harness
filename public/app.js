@@ -542,7 +542,8 @@
         const card = el('div', 'agent-card');
         card.innerHTML = `<div class="head">⇢ 子代理 · <span class="name"></span></div><div class="body"></div>`;
         card.querySelector('.name').textContent = ev.description;
-        card.querySelector('.body').textContent = `模型 ${ev.model} · 深度 ${ev.depth}`;
+        const cred = { request: '本次请求', 'request(baseUrl only)': '本次请求(仅端点)', 'server-env': '服务端环境变量' }[ev.credentialSource] || ev.credentialSource || '本次请求';
+        card.querySelector('.body').textContent = `${ev.provider ? `${ev.provider} · ` : ''}${ev.model} · 深度 ${ev.depth} · 凭证 ${cred}`;
         els.messages.append(card);
         state.toolCards.set(`agent:${ev.agentId}`, card);
         scrollDown();
@@ -637,6 +638,25 @@
   }
 
   // ---------- 发送一轮 ----------
+  /**
+   * 组装请求体：模型凭证 + 审批模式 + 沙箱。
+   * 子代理和工作流都靠这份凭证，所以任何发起模型调用的入口（对话 / 工作流）都要用它。
+   */
+  function requestPayload(extra = {}) {
+    const providerId = els.provider.value;
+    const prof = profileOf(providerId);
+    return {
+      sessionId: state.sessionId,
+      approvalMode: els.approvalMode.value,
+      provider: providerId,
+      model: els.model.value.trim() || undefined,
+      apiKey: prof.apiKey || undefined,
+      baseUrl: prof.baseUrl || undefined,
+      sandbox: state.settings.sandbox || undefined,
+      ...extra,
+    };
+  }
+
   async function send(text) {
     if (state.running || !String(text).trim()) return;
     const providerId = els.provider.value;
@@ -657,16 +677,7 @@
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          sessionId: state.sessionId,
-          message: text,
-          approvalMode: els.approvalMode.value,
-          provider: providerId,
-          model,
-          apiKey: prof.apiKey || undefined,
-          baseUrl: prof.baseUrl || undefined,
-          sandbox: state.settings.sandbox || undefined,
-        }),
+        body: JSON.stringify(requestPayload({ message: text })),
         signal: state.controller.signal,
       });
       if (!res.ok || !res.body) {
@@ -879,7 +890,7 @@
     );
   });
 
-  window.Chat = { handleEvent, loadSession, newSession, addBubble, reset: newSession, state };
+  window.Chat = { handleEvent, loadSession, newSession, addBubble, reset: newSession, requestPayload, state };
 
   // ---------- 启动 ----------
   (async () => {
