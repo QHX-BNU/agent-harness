@@ -156,9 +156,39 @@ export function createFeishuChannel({
         /* 解析失败就换下一个身份 */
       }
     }
-    state.members[chatId] = { at: Date.now(), map };
+    // 群成员列表给的是「群内显示名」，可能像 用户138576 这种没设过名的占位；
+    // 组织通讯录里的才是真名（localized_name），能拿到就用它覆盖。
+    await enrichOrgNames(Object.keys(map)).catch(() => {});
+    const refined = {};
+    for (const id of Object.keys(map)) refined[id] = identities.name(id) || map[id];
+    state.members[chatId] = { at: Date.now(), map: refined };
     persist();
-    return map;
+    return refined;
+  }
+
+  /** 用通讯录（user 身份）批量换成组织真名 */
+  async function enrichOrgNames(ids) {
+    const need = (ids || []).filter((id) => id && id.startsWith('ou_') && !identities.data.orgNames?.[id]);
+    if (!need.length) return 0;
+    const r = await runCli([...cliBase(), 'contact', '+search-user', '--user-ids', need.join(','), '--as', 'user'], {
+      timeoutMs: 10000,
+    });
+    if (!r.ok) return 0;
+    try {
+      const j = JSON.parse(r.out.slice(r.out.indexOf('{')));
+      let n = 0;
+      for (const u of j?.data?.users || []) {
+        const name = u.localized_name || u.name;
+        if (u.open_id && name) {
+          identities.setOrgName(u.open_id, name);
+          n++;
+        }
+      }
+      if (n) log(`[feishu] 通讯录换真名 ${n} 个`);
+      return n;
+    } catch {
+      return 0;
+    }
   }
 
   /** 给某个 open_id 找名字（找不到就返回 null，调用方退回 id） */
@@ -218,11 +248,12 @@ export function createFeishuChannel({
     const wsId = (cfg.workspaceByChat || {})[ev.chat_id] || cfg.workspaceId || 'default';
     const ws = workspaces?.get(wsId) || workspaces?.get('default');
     const chat = state.chats[ev.chat_id] || {};
+    const chatTitle = identities.chatName(ev.chat_id) || chat.name || null;
     const session = store.create({
       provider: cfg.provider || config.provider,
       model: cfg.model || config.model,
       approvalMode: cfg.approvalMode || 'auto',
-      title: `${chat.name || (ev.chat_type === 'p2p' ? '飞书私聊' : `飞书群 ${String(ev.chat_id).slice(-6)}`)}`,
+      title: chatTitle || (ev.chat_type === 'p2p' ? '飞书私聊' : `飞书群 ${String(ev.chat_id).slice(-6)}`),
       workspaceId: ws?.id || 'default',
       workspacePath: ws?.path || config.workspace,
     });
@@ -306,6 +337,11 @@ export function createFeishuChannel({
       status.ignored++;
       return { ok: false, reason: 'from_bot' };
     }
+    // 只服务群时，私聊直接不理
+    if (ev.chat_type === 'p2p' && cfg.allowP2p === false) {
+      status.ignored++;
+      return { ok: false, reason: 'p2p_disabled' };
+    }
     if (!['text', 'post'].includes(ev.message_type)) {
       status.ignored++;
       return { ok: false, reason: 'unsupported_type' };
@@ -334,22 +370,34 @@ export function createFeishuChannel({
 
     const session = ensureSession(ev);
     const ws = workspaces?.get(session.workspaceId) || workspaces?.get('default');
+    const isPrivate = ev.chat_type === 'p2p';
     const turnConfig = {
       ...config,
       workspace: ws?.path || config.workspace,
       workspaceName: ws?.name || '',
       // 跨群可见性开关跟着通道配置走（digest 工具会读它）
       crossGroup: cfg.crossGroup !== false,
-      channelPrompt: [
-        '你正在飞书里为团队提供服务：用户在群聊或私聊里 @ 你，你用工具帮他干活，结论会回复到原消息。',
-        '- 回答要能直接贴进聊天窗口：先给结论，再给必要细节；不要长篇大论，不要复述工具输出。',
-        '- 你看不到聊天记录以外的群消息。需要背景时，用 memory_search / session_list 查这个工作区里沉淀的信息。',
-        '- 群里沉淀下来的、以后还用得上的事实（约定、结论、负责人、进度），用 memory_add 时**显式传 scope="workspace"**，' +
-          '这样别的群、别的会话也能召回；只跟当前话题有关的临时信息才用默认的 session。',
-        '- 所有群共用同一个工作区，所以别的群里记下的事实你也能查到；引用时说明来源群，别把 A 群的结论按到 B 群头上。',
-        '- 有人问「某某最近做了什么/在忙什么」时，用 user_activity（按姓名或 open_id）查；' +
-          '问「最近大家在聊什么」用 session_list，要细节再用 session_read。回答时点明是谁、在哪个群、什么时候。',
-      ].join('\n'),
+      // 私聊隔离：私聊会话不会被别人的查询看到，私聊里记的事实也不进共享记忆
+      privateIsolation: cfg.privateIsolation !== false,
+      ...(isPrivate && cfg.privateIsolation !== false ? { memoryScopeOverride: 'session' } : {}),
+      channelPrompt: isPrivate
+        ? [
+            '你正在飞书**私聊**里为用户提供服务：他私聊 @ 你，你用工具帮他干活，结论回复给他本人。',
+            '- 私聊是私密的：不要把这里的内容写进 workspace 级记忆（写记忆会自动降级为会话级）。',
+            '- 不要主动把别的群、别的同事的会话内容搬到私聊里；对方明确问起团队公开进展时，可以说群里讨论过什么。',
+            '- 回答要能直接贴进聊天窗口：先给结论，再给必要细节。',
+          ].join('\n')
+        : [
+            '你正在飞书里为团队提供服务：用户在群聊里 @ 你，你用工具帮他干活，结论会回复到原消息。',
+            '- 回答要能直接贴进聊天窗口：先给结论，再给必要细节；不要长篇大论，不要复述工具输出。',
+            '- 你看不到聊天记录以外的群消息。需要背景时，用 memory_search / session_list 查这个工作区里沉淀的信息。',
+            '- 群里沉淀下来的、以后还用得上的事实（约定、结论、负责人、进度），用 memory_add 时**显式传 scope="workspace"**，' +
+              '这样别的群、别的会话也能召回；只跟当前话题有关的临时信息才用默认的 session。',
+            '- 所有群共用同一个工作区，所以别的群里记下的事实你也能查到；引用时说明来源群，别把 A 群的结论按到 B 群头上。',
+            '- 有人问「某某最近做了什么/在忙什么」时，用 user_activity（按姓名或 open_id）查；' +
+              '问「最近大家在聊什么」用 session_list，要细节再用 session_read。回答时点明是谁、在哪个群、什么时候。',
+            '- 私聊内容你查不到，也不要声称知道别人私聊说了什么。',
+          ].join('\n'),
     };
 
     // 凭证优先级：通道自己的配置 > 网页同步过来的运行时配置 > 服务端环境变量
@@ -471,6 +519,14 @@ export function createFeishuChannel({
 
   // ---------- 子进程：事件流 ----------
   function start() {
+    // 正在退出中的进程还没关掉，等它关了再起（否则 start→stop→start 会静默失败）
+    if (child && stopping) {
+      child.once('close', () => {
+        child = null;
+        start();
+      });
+      return status;
+    }
     if (child) return status;
     stopping = false;
     const args = [

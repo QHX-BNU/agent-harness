@@ -579,6 +579,17 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, ...describeRuntimeModel(), apiKey: saved?.apiKey ? '***' : undefined });
     }
 
+    // --- 身份（open_id → 真名）---
+    if (req.method === 'GET' && p === '/api/identities') {
+      return json(res, 200, { ...identities.list(), file: identities.file });
+    }
+    if (req.method === 'POST' && p === '/api/identities/alias') {
+      const body = await readBody(req);
+      if (!body.id) return json(res, 400, { error: 'id 不能为空' });
+      const name = identities.setAlias(String(body.id), body.name);
+      return json(res, 200, { ok: true, id: body.id, alias: name });
+    }
+
     // --- 通道（飞书机器人）---
     if (req.method === 'GET' && p === '/api/channels') {
       return json(res, 200, {

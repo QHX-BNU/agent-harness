@@ -358,6 +358,36 @@ Invoke-WebRequest http://127.0.0.1:5175/api/channels/feishu/simulate -Method POS
 - 用 `FEISHU_WORKSPACE_MAP` 把不同群分到不同工作区（记忆与检索都隔离）
 - 或用 `FEISHU_CROSS_GROUP=0` 关掉跨群人员/会话工具（机器人只能看到当前群）
 
+### 真实姓名与私聊隔离
+
+**姓名来源（优先级从高到低）**：
+
+1. **人工别名** —— `POST /api/identities/alias {id, name}`，钉死后永远用它
+2. **组织通讯录真名** —— `contact +search-user --user-ids` 拿 `localized_name`
+3. 群内显示名 —— 群成员列表给的，常常是「用户138576」这种没设过名字的占位
+
+飞书事件只给 `open_id`，不给名字；群成员列表给的是显示名。所以机器人会两者都查一次并缓存到
+`.channels/identities.json`，展示时用真名（消息里存的历史快照名不会盖过它）。
+
+```
+# 回填历史会话的姓名/群名（含通讯录真名）
+node scripts/backfill-identities.js
+# 看看当前缓存
+curl http://127.0.0.1:5175/api/identities
+```
+
+**私聊隔离**（默认开启，`FEISHU_PRIVATE_ISOLATION=1`）：
+
+| 行为 | 结果 |
+|---|---|
+| 群里的人查 `session_list` / `user_activity` | **看不到任何私聊会话**（只能看到群） |
+| 群里的人 `session_read` 别人的私聊 | 直接拒绝：「这是别人的私聊会话，出于隐私保护不能读取」 |
+| 私聊里 `memory_add` 想写 workspace 级 | **自动降级为会话级**，并回一句「私聊场景已降级」 |
+| 私聊会话自己读自己 | 正常 |
+| 想让机器人完全不理私聊 | `FEISHU_ALLOW_P2P=0` |
+
+也就是说：**机器人只能查到群里的信息，私聊内容既不会被群里查到，也不会从别的群漏出去。**
+
 ## 工作区：一个 harness，多个目录
 
 左栏按**工作区分组**，每个工作区下面是它自己的会话：

@@ -24,9 +24,15 @@ export const memoryAdd = {
     required: ['content'],
   },
   async run(args, ctx) {
+    // 私聊场景：不允许把内容写进共享记忆（否则私聊信息会从别的群漏出去）。
+    // 双重保险：既看通道给的 memoryScopeOverride，也直接看会话本身是不是私聊。
+    const isPrivateSession =
+      ctx.session?.channel?.type === 'feishu' && ctx.session.channel.chatType === 'p2p' && ctx.config?.privateIsolation !== false;
+    const forced = ctx.config?.memoryScopeOverride || (isPrivateSession ? 'session' : null);
+    const scope = forced || args.scope || 'session';
     const item = ctx.memory.add({
       content: args.content,
-      scope: args.scope || 'session',
+      scope,
       category: args.category || 'knowledge',
       importance: args.importance ?? 0.6,
       tags: args.tags || [],
@@ -34,7 +40,8 @@ export const memoryAdd = {
       workspaceId: ctx.workspaceId, // workspace 级记忆归属于当前会话所在的工作区
     });
     ctx.emit?.({ type: 'memory', action: 'add', item });
-    return `已记住 #${item.id} [${item.scope}/${item.category} 重要度${item.importance}] ${item.content}`;
+    const note = forced && args.scope && args.scope !== forced ? `（原本要写 ${args.scope} 级，私聊场景已降级为 ${forced}）` : '';
+    return `已记住 #${item.id} [${item.scope}/${item.category} 重要度${item.importance}] ${item.content}${note}`;
   },
 };
 

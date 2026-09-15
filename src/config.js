@@ -91,6 +91,10 @@ export const config = {
     approvalMode: env.FEISHU_APPROVAL_MODE || 'auto', // 机器人没人可问，默认自动放行
     // 0 = 关掉跨群/跨会话查询（user_activity / session_list / session_read），只看得到当前会话
     crossGroup: env.FEISHU_CROSS_GROUP !== '0',
+    // 私聊隔离：私聊会话永远不出现在别人的查询结果里，私聊里写的事实也不会进共享记忆
+    privateIsolation: env.FEISHU_PRIVATE_ISOLATION !== '0',
+    // 0 = 机器人完全不理会私聊（只服务群）
+    allowP2p: env.FEISHU_ALLOW_P2P !== '0',
     progressAfterMs: num(env.FEISHU_PROGRESS_AFTER_MS, 15000),
     chunkSize: num(env.FEISHU_CHUNK_SIZE, 3000),
     maxRestarts: num(env.FEISHU_MAX_RESTARTS, 5),

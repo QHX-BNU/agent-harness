@@ -160,5 +160,16 @@ const hardTarget = await send('/api/sessions', { title: '硬删除测试' });
 const hardDel = await (await fetch(`${base}/api/sessions/${hardTarget.data.id}?hard=1`, { method: 'DELETE' })).json();
 ok('?hard=1 直接真删不进回收站', hardDel.soft === false && hardDel.trashId === null);
 
+// ---- 身份缓存（open_id → 真名）----
+const ids0 = await get('/api/identities');
+ok('GET /api/identities', ids0.status === 200 && Array.isArray(ids0.data.users) && Array.isArray(ids0.data.chats), `${ids0.data.users.length} 人 / ${ids0.data.chats.length} 群`);
+const alias = await send('/api/identities/alias', { id: 'ou_test_alias', name: '测试别名' });
+ok('POST 设置人工别名', alias.status === 200 && alias.data.alias === '测试别名');
+const ids1 = await get('/api/identities');
+ok('别名出现在列表里', ids1.data.users.some((u) => u.id === 'ou_test_alias' && u.name === '测试别名'));
+const cleared = await send('/api/identities/alias', { id: 'ou_test_alias', name: '' });
+ok('传空名字可清除别名', cleared.status === 200 && cleared.data.alias === null);
+ok('没 id 会被拒', (await send('/api/identities/alias', { name: 'x' })).status === 400);
+
 console.log(`\n${fail === 0 ? '✓' : '✗'} 接口冒烟: ${pass} 通过 / ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

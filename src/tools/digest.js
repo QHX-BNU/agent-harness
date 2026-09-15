@@ -7,17 +7,28 @@ import { looksLikeId } from '../identities.js';
 
 const PREFIX_RE = /^\[(飞书群「(.+?)」|飞书私聊) · (.+?)\((ou_[A-Za-z0-9]+)\)\]/;
 
-/** 显示用姓名：消息里存的名字 → 身份缓存 → 退回顾 open_id */
+/**
+ * 显示用姓名：身份缓存（别名/组织真名，最新）→ 消息里存的快照名 → 退回顾 open_id。
+ * 顺序不能反：消息里存的是写入当时的名字，可能是「用户138576」这种占位，
+ * 而通讯录里已经是真名了。
+ */
 function displayName(ctx, sender) {
   if (!sender) return null;
+  const live = ctx?.identities?.name?.(sender.id);
+  if (live) return live;
   const stored = sender.name && !looksLikeId(sender.name) ? sender.name : null;
-  return stored || ctx?.identities?.name?.(sender.id) || sender.name || sender.id;
+  return stored || sender.name || sender.id;
 }
 
-/** 群名同理：缓存里有真名就用真名 */
+/** 群名同理：身份缓存优先 */
 function displayChat(ctx, sender, fallback = null) {
-  const title = sender?.chatTitle && !looksLikeId(sender.chatTitle) ? sender.chatTitle : null;
-  return title || ctx?.identities?.chatName?.(sender?.chatId) || fallback || sender?.chatTitle || null;
+  return (
+    ctx?.identities?.chatName?.(sender?.chatId) ||
+    (sender?.chatTitle && !looksLikeId(sender.chatTitle) ? sender.chatTitle : null) ||
+    fallback ||
+    sender?.chatTitle ||
+    null
+  );
 }
 
 /** 从一条用户消息里取出说话人（结构化优先，退回解析正文前缀） */
@@ -46,12 +57,13 @@ export function sendersOf(session) {
   return [...map.values()].map((x) => ({ ...x, chats: [...x.chats] }));
 }
 
-const where = (session) => {
+const where = (session, ctx = null) => {
   const ch = session?.channel;
   if (ch?.type === 'feishu') {
     if (ch.chatType === 'p2p') return '飞书私聊';
-    // 标题可能已经是「飞书群 xxx」这种占位，别再套一层
-    const title = String(session.title || ch.chatId || '').replace(/^飞书群\s*/, '');
+    // 群名以身份缓存为准（标题可能还是「飞书群 oc_xxx」这种占位）
+    const live = ctx?.identities?.chatName?.(ch.chatId);
+    const title = String(live || session.title || ch.chatId || '').replace(/^飞书群\s*/, '');
     return `飞书群「${title}」`;
   }
   return '网页';
@@ -77,6 +89,40 @@ function crossGroupBlocked(ctx) {
     '不能查询其他群/其他同事的会话。如果用户需要跨群汇总，请让管理员打开这个开关。'
   );
 }
+
+/**
+ * 可见会话：**私聊内容不外泄**。
+ * 规则：私聊会话只有它自己能读到——群里的人（哪怕在同一个工作区）查不到别人私聊说了什么。
+ */
+function visibleSessions(ctx) {
+  const all = ctx.store.list({ workspaceId: ctx.workspaceId === 'default' ? null : ctx.workspaceId });
+  const selfId = ctx.session?.id;
+  return all.filter((s) => {
+    if (ctx.config?.privateIsolation === false) return true;
+    const full = ctx.store.get(s.id);
+    const isPrivate = full?.channel?.type === 'feishu' && full.channel.chatType === 'p2p';
+    return !isPrivate || s.id === selfId;
+  });
+}
+
+/** 一个说话人可能有的所有名字（真名/别名/群显示名/id），用于按名字模糊匹配 */
+function nameCandidates(ctx, sender) {
+  const ident = ctx?.identities;
+  const id = sender.id;
+  const raw = ident?.data?.users?.[id];
+  return [
+    displayName(ctx, sender),
+    ident?.data?.orgNames?.[id]?.name,
+    ident?.data?.aliases?.[id],
+    typeof raw === 'string' ? raw : raw?.name,
+    sender.name,
+    id,
+  ]
+    .filter(Boolean)
+    .map((x) => String(x).toLowerCase());
+}
+
+const matchesUser = (ctx, sender, query) => nameCandidates(ctx, sender).some((n) => n === query || n.includes(query));
 
 /** 展示正文时去掉来源前缀（说话人已经单独标出来了，避免重复） */
 const bodyOf = (message) => String(message?.content || '').replace(PREFIX_RE, '').trim();
@@ -125,7 +171,7 @@ export const sessionList = {
   async run({ limit = 20, keyword, user, max_age_hours }, ctx) {
     const blocked = crossGroupBlocked(ctx);
     if (blocked) return blocked;
-    const all = ctx.store.list({ workspaceId: ctx.workspaceId === 'default' ? null : ctx.workspaceId });
+    const all = visibleSessions(ctx);
     const since = max_age_hours ? Date.now() - Number(max_age_hours) * 3600e3 : 0;
     const rows = [];
     for (const s of all) {
@@ -135,13 +181,13 @@ export const sessionList = {
       const people = sendersOf(full).map((p) => ({ ...p, display: displayName(ctx, p) }));
       if (user) {
         const q = String(user).toLowerCase();
-        if (!people.some((p) => p.id.toLowerCase() === q || (p.display || '').toLowerCase().includes(q))) continue;
+        if (!people.some((p) => matchesUser(ctx, p, q))) continue;
       }
       if (rows.length >= (Number(limit) || 20)) break;
       const last = [...(full?.messages || [])].reverse().find((m) => m.role === 'assistant' && m.content);
       const who = people.length ? `参与者: ${people.map((p) => p.display).slice(0, 4).join(', ')}` : '（没有记录到说话人）';
       rows.push(
-        `- [${s.id}] ${s.title || '未命名'}（${where(full)}，${ago(s.updatedAt)}，${s.messages} 条消息）\n` +
+        `- [${s.id}] ${s.title || '未命名'}（${where(full, ctx)}，${ago(s.updatedAt)}，${s.messages} 条消息）\n` +
           `  ${who}\n` +
           `  最后结论: ${oneLine(last?.content, 140) || '（还没有结论）'}`,
       );
@@ -171,6 +217,10 @@ export const sessionRead = {
     if (blocked) return blocked;
     const s = ctx.store.get(String(session));
     if (!s) throw new Error(`没有这个会话：${session}`);
+    // 私聊会话不许被别人读（哪怕是同一个工作区）
+    if (ctx.config?.privateIsolation !== false && s.channel?.type === 'feishu' && s.channel.chatType === 'p2p' && s.id !== ctx.session?.id) {
+      return '这是别人的私聊会话，出于隐私保护不能读取。只能看群里的讨论，或者你自己的私聊。';
+    }
     const msgs = s.messages.slice(-(Number(limit) || 20));
     const body = msgs
       .map((m) => {
@@ -182,7 +232,7 @@ export const sessionRead = {
       .join('\n');
     const people = sendersOf(s).map((p) => ({ ...p, display: displayName(ctx, p) }));
     return (
-      `会话 ${s.id}「${s.title || '未命名'}」（${where(s)}，${s.messages} 条消息，最近 ${msgs.length} 条）\n` +
+      `会话 ${s.id}「${s.title || '未命名'}」（${where(s, ctx)}，${s.messages} 条消息，最近 ${msgs.length} 条）\n` +
       `参与者: ${people.map((p) => `${p.display}(${p.id})`).join(', ') || '无记录'}\n` +
       `${body}`
     );
@@ -211,7 +261,7 @@ export const userActivity = {
     const q = String(user || '').trim().toLowerCase();
     if (!q) throw new Error('user 不能为空');
     const since = Date.now() - Number(hours) * 3600e3;
-    const all = ctx.store.list({ workspaceId: ctx.workspaceId === 'default' ? null : ctx.workspaceId });
+    const all = visibleSessions(ctx);
     const hits = [];
     const people = new Map();
 
@@ -219,7 +269,7 @@ export const userActivity = {
       const full = ctx.store.get(s.id);
       const senders = sendersOf(full).map((p) => ({ ...p, display: displayName(ctx, p) }));
       for (const p of senders) people.set(p.id, p.display);
-      const me = senders.find((p) => p.id.toLowerCase() === q || (p.display || '').toLowerCase().includes(q));
+      const me = senders.find((p) => matchesUser(ctx, p, q));
       if (!me) continue;
       const threads = pairsOf(full?.messages || [], me.id, ctx);
       const last = [...(full.messages || [])].reverse().find((m) => m.role === 'assistant' && m.content);
@@ -250,7 +300,7 @@ export const userActivity = {
         .map((t) => `    · 「${t.ask}」 → ${t.answer ? oneLine(t.answer, 160) : '（还没回复）'}`)
         .join('\n');
       const t = h.todos.length ? `\n    任务清单: ${h.todos.slice(0, 4).join(' / ')}` : '';
-      return `- ${where(h.session)}（${ago(h.session.updatedAt)}，共 ${h.me.messages} 条发言）\n${body}${t}`;
+      return `- ${where(h.session, ctx)}（${ago(h.session.updatedAt)}，共 ${h.me.messages} 条发言）\n${body}${t}`;
     });
 
     return (

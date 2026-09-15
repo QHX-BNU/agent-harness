@@ -40,8 +40,9 @@ for (const s of store.list({ includeChildren: true })) {
 }
 console.log(`发现 ${chats.size} 个群、${users.size} 个说话人`);
 
-// 2) 逐群拉成员列表 → 真实姓名
+// 2) 逐群拉成员列表 → 显示名；再用通讯录换成组织真名（localized_name）
 let resolved = 0;
+const allIds = new Set();
 for (const chatId of chats.keys()) {
   for (const identity of ['user', 'bot']) {
     const r = await run(['im', '+chat-members-list', '--chat-id', chatId, '--as', identity]);
@@ -53,14 +54,38 @@ for (const chatId of chats.keys()) {
       for (const b of j?.data?.bots || []) if (b.member_id && b.name) map[b.member_id] = b.name;
       if (Object.keys(map).length) {
         resolved += identities.setUsers(map);
-        const name = identities.chatName(chatId);
+        for (const id of Object.keys(map)) allIds.add(id);
         console.log(`  ${chatId} → ${Object.values(map).join(', ')}`);
-        void name;
         break;
       }
     } catch {
       /* 换下一个身份 */
     }
+  }
+}
+
+// 2b) 通讯录真名：群成员列表给的是「群内显示名」，组织里的名字才准
+if (allIds.size) {
+  const ids = [...allIds].filter((id) => id.startsWith('ou_'));
+  const r = await run(['contact', '+search-user', '--user-ids', ids.join(','), '--as', 'user']);
+  if (r.code === 0 && r.out.trim()) {
+    try {
+      const j = JSON.parse(r.out.slice(r.out.indexOf('{')));
+      let n = 0;
+      for (const u of j?.data?.users || []) {
+        const name = u.localized_name || u.name;
+        if (u.open_id && name) {
+          identities.setOrgName(u.open_id, name);
+          n++;
+          console.log(`  组织真名: ${u.open_id} → ${name}`);
+        }
+      }
+      console.log(`  通讯录换了 ${n} 个真名`);
+    } catch {
+      /* 忽略 */
+    }
+  } else {
+    console.log('  通讯录查询失败（需要 user 身份授权 contact 权限），沿用群内显示名');
   }
 }
 
@@ -82,5 +107,5 @@ for (const chatId of chats.keys()) {
 const { users: u, chats: c } = identities.list();
 console.log(`\n身份缓存已更新：${u.length} 个人、${c.length} 个群（本次新解析 ${resolved} 个姓名）`);
 console.log(`文件: ${identities.file}`);
-for (const x of u) console.log(`  ${x.name}  ${x.id}`);
+for (const x of u) console.log(`  ${x.name}${x.alias ? `（别名 ${x.alias}）` : ''}${x.org ? `（组织名 ${x.org}）` : ''}  ${x.id}`);
 for (const x of c) console.log(`  群「${x.name}」  ${x.id}`);

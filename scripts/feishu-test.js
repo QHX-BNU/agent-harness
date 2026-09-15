@@ -359,6 +359,50 @@ section('[3c] 谁做了什么');
   ok('老消息（前缀形式）也能配对且去掉前缀', legacy.length === 1 && legacy[0].ask === '老问题', JSON.stringify(legacy));
 }
 
+// ================= 3d. 私聊隔离 =================
+section('[3d] 私聊隔离');
+{
+  // 私聊里说的话
+  const p = await channel.simulate({
+    chatId: 'oc_p2p_private',
+    chatType: 'p2p',
+    senderId: 'ou_dave',
+    senderName: '戴夫',
+    content: '@小助手 我的工资卡号是 6222****，帮我记一下',
+  });
+  ok('私聊能正常处理', p.ok && Boolean(p.sessionId), p.reason || '');
+  const pSess = store.get(p.sessionId);
+  ok('私聊会话标记为 p2p', pSess.channel?.chatType === 'p2p', JSON.stringify(pSess.channel));
+
+  const groupCtx = { session: store.get(channel.state.sessions['oc_group_1:main']), store, memory, identities: channel.identities, workspaceId: 'default', config: { ...testConfig, privateIsolation: true } };
+  const privCtx = { session: pSess, store, memory, identities: channel.identities, workspaceId: 'default', config: { ...testConfig, privateIsolation: true } };
+
+  const list = await tools.execute('session_list', { limit: 50 }, groupCtx);
+  ok('群里的 session_list 看不到任何私聊', list.ok && !/私聊/.test(list.content), list.content.split('\n')[0]);
+
+  const act = await tools.execute('user_activity', { user: '戴夫' }, groupCtx);
+  ok('群里按人查不到私聊活动', act.ok && /没有找到/.test(act.content), act.content.split('\n')[0]);
+
+  const read = await tools.execute('session_read', { session: p.sessionId }, groupCtx);
+  ok('群里读别人的私聊被拒', read.ok && /隐私/.test(read.content), read.content.slice(0, 40));
+
+  const selfRead = await tools.execute('session_read', { session: p.sessionId, limit: 5 }, privCtx);
+  ok('私聊自己能读自己的', selfRead.ok && /工资卡号/.test(selfRead.content));
+
+  // 私聊里写记忆必须降级为会话级
+  const memCtx = { ...privCtx, memory, session: pSess, workspaceId: 'default' };
+  const before = memory.stats().total;
+  const added = await tools.execute('memory_add', { content: '戴夫的工资卡号尾号 1234', scope: 'workspace' }, memCtx);
+  ok('私聊里写 workspace 记忆被降级为 session', added.ok && /已降级为 session/.test(added.content), added.content.slice(0, 70));
+  const stored = memory.list({ sessionId: pSess.id, includeSession: true, limit: 500 }).find((m) => /工资卡号尾号/.test(m.content));
+  ok('降级后确实只存在会话级', stored?.scope === 'session' && memory.stats().total === before + 1, `scope=${stored?.scope}`);
+
+  // 关掉隔离开关后行为回到「可见」
+  const openCtx = { ...groupCtx, config: { ...testConfig, privateIsolation: false } };
+  const openRead = await tools.execute('session_read', { session: p.sessionId, limit: 5 }, openCtx);
+  ok('关掉隔离后可以读（开关有效）', openRead.ok && /工资卡号/.test(openRead.content));
+}
+
 // ================= 4. 回复内容与分片 =================
 section('[4] 回复');
 {
@@ -437,9 +481,13 @@ section('[7] 服务接口');
     // 测试不能把正在跑的通道留在停止状态
     if (wasRunning) {
       await fetch(`${BASE}/api/channels/feishu/start`, { method: 'POST' });
-      await sleep(1500);
-      const back = await (await fetch(`${BASE}/api/channels`)).json();
-      ok('测试结束后恢复原有运行状态', back.feishu.running === true, '（原本就在跑，已重新拉起）');
+      let back = null;
+      for (let i = 0; i < 20; i++) {
+        await sleep(700);
+        back = await (await fetch(`${BASE}/api/channels`)).json();
+        if (back.feishu.running && back.feishu.ready) break;
+      }
+      ok('测试结束后恢复原有运行状态', back.feishu.running === true, `ready=${back.feishu.ready}`);
     }
   } else {
     console.log('  ⊘ 服务未运行或版本较旧，跳过接口检查');
