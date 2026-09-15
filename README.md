@@ -72,7 +72,7 @@
 ## 快速开始
 
 ```powershell
-cd D:\Agent\DSH\harness
+cd D:\work\agent-harness
 node server.js          # 打开 http://127.0.0.1:5175
 ```
 
@@ -434,7 +434,7 @@ curl http://127.0.0.1:5175/api/identities
 启动日志会直接打出计数，方便确认：
 
 ```
-会话 = 3 个（D:\Agent\DSH\harness\.sessions）· 回收站 = 0 个（D:\Agent\DSH\harness\.sessions-trash）
+会话 = 3 个（D:\work\agent-harness\.sessions）· 回收站 = 0 个（D:\work\agent-harness\.sessions-trash）
 最近会话 = 3f78450d/用子代理帮我列一下当前工作区的文件 · 4e9e2c60/[子代理] 列工作区文件
 ```
 

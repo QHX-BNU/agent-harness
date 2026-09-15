@@ -1,6 +1,8 @@
 # 会话与状态
 .sessions/
 .sessions-test/
+# 回收站：删掉的会话（属于运行态数据，不进仓库）
+.sessions-trash/
 .artifacts/
 .artifacts-test/
 .channels/
