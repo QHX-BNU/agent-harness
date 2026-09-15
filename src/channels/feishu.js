@@ -19,6 +19,7 @@ import { runTurn } from '../loop.js';
 import { Policy } from '../policy.js';
 import { createProvider } from '../providers/index.js';
 import { createSandbox } from '../sandbox.js';
+import { getRuntimeModel } from '../runtime-model.js';
 
 const truncate = (s, n) => (String(s ?? '').length > n ? `${String(s).slice(0, n)}…` : String(s ?? ''));
 
@@ -285,11 +286,13 @@ export function createFeishuChannel({
       ].join('\n'),
     };
 
+    // 凭证优先级：通道自己的配置 > 网页同步过来的运行时配置 > 服务端环境变量
+    const rt = getRuntimeModel() || {};
     const provider = providerFactory({
-      provider: session.provider || config.provider,
-      model: session.model || config.model,
-      baseUrl: cfg.baseUrl || config.baseUrl,
-      apiKey: cfg.apiKey || config.apiKey,
+      provider: cfg.provider || rt.provider || config.provider,
+      model: cfg.model || rt.model || config.model,
+      baseUrl: cfg.baseUrl || rt.baseUrl || config.baseUrl,
+      apiKey: cfg.apiKey || rt.apiKey || config.apiKey,
       timeoutMs: config.modelTimeoutMs,
       retries: config.modelRetries,
     });
@@ -327,10 +330,10 @@ export function createFeishuChannel({
           emit,
         }),
         modelConfig: {
-          provider: session.provider,
-          model: session.model,
-          baseUrl: cfg.baseUrl || config.baseUrl || undefined,
-          apiKey: cfg.apiKey || config.apiKey || undefined,
+          provider: provider.id,
+          model: provider.model,
+          baseUrl: cfg.baseUrl || rt.baseUrl || config.baseUrl || undefined,
+          apiKey: cfg.apiKey || rt.apiKey || config.apiKey || undefined,
         },
         depth: 0,
       });
@@ -400,9 +403,11 @@ export function createFeishuChannel({
         ebuf = ebuf.slice(nl + 1);
         if (!line) continue;
         if (/\[event\] ready/.test(line) || /listening for events/.test(line)) {
-          ready = true;
-          status.ready = true;
-          log('[feishu] 已就绪，等待 @ 消息');
+          if (!ready) {
+            ready = true;
+            status.ready = true;
+            log('[feishu] 已就绪，等待 @ 消息');
+          }
         } else if (/exited/.test(line)) {
           log(`[feishu] ${line}`);
         }

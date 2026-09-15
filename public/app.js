@@ -43,6 +43,8 @@
     sbResult: $('sbResult'),
     sbPreview: $('sbPreview'),
     sbBadge: $('sbBadge'),
+    syncModel: $('syncModel'),
+    runtimeModel: $('runtimeModel'),
   };
 
   const STORAGE_KEY = 'mini-harness.settings.v1';
@@ -241,6 +243,7 @@
     els.setTopK.value = state.settings.topK ?? 5;
     fillModelList(els.setModelList, providerInfo(id)?.models || []);
     applySandboxForm();
+    refreshRuntimeModel();
     els.testResult.textContent = '';
     els.testResult.style.color = '';
     els.modal.hidden = false;
@@ -301,6 +304,54 @@
     applySettings();
     renderSandboxPreview();
     closeModal();
+  }
+
+  // ---------- 运行时模型（给飞书机器人这类没有浏览器的入口用）----------
+  async function refreshRuntimeModel() {
+    if (!els.runtimeModel) return;
+    try {
+      const r = await (await fetch('/api/model/runtime')).json();
+      if (!r.set) {
+        els.runtimeModel.textContent =
+          '服务端当前没有运行时模型：飞书机器人会用环境变量里的模型（没配就是 mock）。填好上面的 key 后点「同步给服务端」。';
+        return;
+      }
+      els.runtimeModel.innerHTML =
+        `服务端当前运行时模型：<b>${esc(r.provider || '?')} · ${esc(r.model || '?')}</b>` +
+        `${r.hasApiKey ? '（含 key）' : '（无 key）'} · ${new Date(r.updatedAt).toLocaleTimeString('zh-CN')}` +
+        '<br>只存在内存里，重启服务就没了，不会落盘。';
+    } catch {
+      els.runtimeModel.textContent = '';
+    }
+  }
+
+  async function syncModelToServer() {
+    const form = readForm();
+    els.syncModel.disabled = true;
+    els.syncModel.textContent = '同步中…';
+    try {
+      const r = await (
+        await fetch('/api/model/runtime', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            provider: form.provider,
+            model: form.profile.model,
+            baseUrl: form.profile.baseUrl,
+            apiKey: form.profile.apiKey,
+          }),
+        })
+      ).json();
+      els.testResult.style.color = r.ok ? 'var(--ok)' : 'var(--err)';
+      els.testResult.textContent = r.ok ? `✓ 已同步：${r.provider} · ${r.model}` : '✗ 同步失败';
+      await refreshRuntimeModel();
+    } catch (err) {
+      els.testResult.style.color = 'var(--err)';
+      els.testResult.textContent = `✗ ${err.message}`;
+    } finally {
+      els.syncModel.disabled = false;
+      els.syncModel.textContent = '同步给服务端';
+    }
   }
 
   // ---------- 沙箱 ----------
@@ -891,6 +942,7 @@
     els.toggleKey.textContent = showing ? '显示' : '隐藏';
   };
   els.testConn.onclick = testConnection;
+  els.syncModel.onclick = syncModelToServer;
   els.saveSettings.onclick = commitSettings;
   els.resetSettings.onclick = () => {
     state.settings = structuredClone(DEFAULT_SETTINGS);

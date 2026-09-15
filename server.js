@@ -15,6 +15,7 @@ import { createAgentRunner } from './src/agents.js';
 import { createWorkflowEngine } from './src/workflow.js';
 import { WorkspaceStore, DEFAULT_WORKSPACE_ID } from './src/workspaces.js';
 import { createFeishuChannel } from './src/channels/feishu.js';
+import { setRuntimeModel, describeRuntimeModel } from './src/runtime-model.js';
 import { createProvider, listProviders, resolveProviderConfig } from './src/providers/index.js';
 import { createSandbox, SCOPE_PRESETS, MODES, backendAvailable } from './src/sandbox.js';
 import { runTurn } from './src/loop.js';
@@ -557,6 +558,18 @@ const server = http.createServer(async (req, res) => {
         const r = store.remove(id, { hard });
         return json(res, 200, { ok: r.ok, soft: !hard, trashId: r.trashId, trashDir: hard ? null : config.trashDir });
       }
+    }
+
+    // --- 运行时模型配置（给没有浏览器的通道用，例如飞书机器人）---
+    if (req.method === 'GET' && p === '/api/model/runtime') return json(res, 200, describeRuntimeModel());
+    if (req.method === 'POST' && p === '/api/model/runtime') {
+      const body = await readBody(req);
+      if (body.clear) {
+        setRuntimeModel(null);
+        return json(res, 200, { ok: true, cleared: true });
+      }
+      const saved = setRuntimeModel(body);
+      return json(res, 200, { ok: true, ...describeRuntimeModel(), apiKey: saved?.apiKey ? '***' : undefined });
     }
 
     // --- 通道（飞书机器人）---
