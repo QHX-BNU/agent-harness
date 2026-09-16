@@ -8,26 +8,59 @@ import { ensureDir } from './fsutil.js';
 
 export class SessionStore {
   constructor({ dir, artifactsDir, trashDir }) {
-    this.dir = dir;
-    this.artifactsDir = artifactsDir;
+    this.dir = path.resolve(dir);
+    this.artifactsDir = path.resolve(artifactsDir);
     // 回收站：删除会话时移到这里而不是直接删，误删可恢复
-    this.trashDir = trashDir || `${dir}-trash`;
+    this.trashDir = path.resolve(trashDir || `${dir}-trash`);
     ensureDir(this.dir);
     ensureDir(this.artifactsDir);
     ensureDir(this.trashDir);
     this.cache = new Map();
+    // 运行中的 turn 会在收尾时 save/appendEvent。会话被删除后必须拦住这些迟到写入，
+    // 否则刚移进回收站的 JSON 会立刻被“复活”。恢复会话时会显式清除 tombstone。
+    this.deleted = new Set();
+  }
+
+  #validSessionId(id) {
+    return /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(String(id || ''));
+  }
+
+  #assertSessionId(id) {
+    const value = String(id || '');
+    if (!this.#validSessionId(value)) throw new Error('会话 id 不合法');
+    return value;
+  }
+
+  /** 只允许一个纯文件名，并二次确认解析后仍在指定目录内。 */
+  #entry(dir, name, label = '文件') {
+    const raw = String(name || '');
+    if (!raw || raw === '.' || raw === '..' || /[\\/\0]/.test(raw) || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(raw)) {
+      throw new Error(`${label}名不合法`);
+    }
+    const root = path.resolve(dir);
+    const abs = path.resolve(root, raw);
+    const rel = path.relative(root, abs);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`${label}越界`);
+    return abs;
   }
 
   #file(id) {
-    return path.join(this.dir, `${id}.json`);
+    return this.#entry(this.dir, `${this.#assertSessionId(id)}.json`, '会话文件');
   }
 
   #eventsFile(id) {
-    return path.join(this.dir, `${id}.events.jsonl`);
+    return this.#entry(this.dir, `${this.#assertSessionId(id)}.events.jsonl`, '事件文件');
+  }
+
+  #trashFile(name) {
+    return this.#entry(this.trashDir, name, '回收站条目');
   }
 
   create({ provider, model, approvalMode, title, kind = 'chat', parentId = null, workspaceId = 'default', workspacePath = null } = {}) {
-    const id = crypto.randomUUID().slice(0, 8);
+    let id;
+    do {
+      id = crypto.randomUUID().slice(0, 8);
+    } while (this.deleted.has(id) || fs.existsSync(this.#file(id)));
     const session = {
       id,
       title: title || '',
@@ -50,6 +83,7 @@ export class SessionStore {
   }
 
   get(id) {
+    if (!this.#validSessionId(id) || this.deleted.has(String(id))) return null;
     if (this.cache.has(id)) return this.cache.get(id);
     const file = this.#file(id);
     if (!fs.existsSync(file)) return null;
@@ -65,8 +99,13 @@ export class SessionStore {
   }
 
   save(session) {
+    const id = this.#assertSessionId(session?.id);
+    if (this.deleted.has(id)) return session;
     session.updatedAt = Date.now();
-    fs.writeFileSync(this.#file(session.id), JSON.stringify(session, null, 2), 'utf8');
+    const file = this.#file(id);
+    // 不跟随攻击者预先放在数据目录里的符号链接。
+    if (fs.existsSync(file) && fs.lstatSync(file).isSymbolicLink()) throw new Error('会话文件不能是符号链接');
+    fs.writeFileSync(file, JSON.stringify(session, null, 2), 'utf8');
     return session;
   }
 
@@ -85,6 +124,8 @@ export class SessionStore {
    * 只有显式 hard=true 才真的从磁盘抹掉。
    */
   remove(id, { hard = false } = {}) {
+    if (!this.#validSessionId(id)) return { ok: false, trashId: null };
+    id = String(id);
     const session = this.get(id);
     this.cache.delete(id);
 
@@ -92,6 +133,7 @@ export class SessionStore {
       for (const f of [this.#file(id), this.#eventsFile(id)]) {
         if (fs.existsSync(f)) fs.rmSync(f, { force: true });
       }
+      this.deleted.add(id);
       return { ok: Boolean(session), trashId: null };
     }
 
@@ -100,9 +142,10 @@ export class SessionStore {
     for (const f of [this.#file(id), this.#eventsFile(id)]) {
       if (!fs.existsSync(f)) continue;
       const name = `${stamp}__${path.basename(f)}`;
-      fs.renameSync(f, path.join(this.trashDir, name));
+      fs.renameSync(f, this.#trashFile(name));
       if (name.endsWith('.json') && !name.includes('.events.')) trashId = name;
     }
+    this.deleted.add(id);
     return { ok: Boolean(trashId || session), trashId };
   }
 
@@ -134,18 +177,21 @@ export class SessionStore {
 
   /** 从回收站恢复一个会话 */
   restore(trashId) {
-    const src = path.join(this.trashDir, trashId);
+    const src = this.#trashFile(trashId);
     if (!fs.existsSync(src)) throw new Error('回收站里没有这个条目');
     const orig = trashId.includes('__') ? trashId.split('__').slice(1).join('__') : trashId;
     const id = orig.replace(/\.json$/, '');
+    this.#assertSessionId(id);
+    if (!orig.endsWith('.json') || orig.endsWith('.events.json')) throw new Error('这不是可恢复的会话文件');
     const target = this.#file(id);
     if (fs.existsSync(target)) throw new Error(`已有同 id 的会话（${id}），无法恢复`);
 
     fs.renameSync(src, target);
     // events 文件在回收站里带同样的时间戳前缀，按 trashId 推导而不是用去前缀的名字
     const evName = trashId.replace(/\.json$/, '.events.jsonl');
-    const evSrc = path.join(this.trashDir, evName);
+    const evSrc = this.#trashFile(evName);
     if (fs.existsSync(evSrc)) fs.renameSync(evSrc, this.#eventsFile(id));
+    this.deleted.delete(id);
     return this.get(id);
   }
 
@@ -155,7 +201,12 @@ export class SessionStore {
     const targets = trashId ? [trashId] : fs.readdirSync(this.trashDir);
     let n = 0;
     for (const t of targets) {
-      const f = path.join(this.trashDir, t);
+      let f;
+      try {
+        f = this.#trashFile(t);
+      } catch {
+        continue;
+      }
       if (fs.existsSync(f) && fs.statSync(f).isFile()) {
         fs.rmSync(f, { force: true });
         n++;
@@ -214,6 +265,7 @@ export class SessionStore {
 
   // ---- 事件日志（trace） ----
   appendEvent(id, ev) {
+    if (!this.#validSessionId(id) || this.deleted.has(String(id))) return;
     try {
       fs.appendFileSync(this.#eventsFile(id), JSON.stringify(ev) + '\n', 'utf8');
     } catch {
@@ -222,6 +274,7 @@ export class SessionStore {
   }
 
   readEvents(id, limit = 500) {
+    if (!this.#validSessionId(id) || this.deleted.has(String(id))) return [];
     const f = this.#eventsFile(id);
     if (!fs.existsSync(f)) return [];
     const lines = fs.readFileSync(f, 'utf8').trim().split('\n').filter(Boolean);
@@ -239,16 +292,26 @@ export class SessionStore {
 
   // ---- 产物：超长内容落盘，上下文里只留路径 ----
   artifact(sessionId, name, content) {
+    const id = this.#assertSessionId(sessionId);
+    if (this.deleted.has(id)) throw new Error('会话已删除，不再写入产物');
     const safe = String(name).replace(/[^\w.-]+/g, '_').slice(0, 60) || 'artifact';
-    const file = path.join(this.artifactsDir, `${sessionId}-${Date.now().toString(36)}-${safe}`);
+    const file = this.#entry(this.artifactsDir, `${id}-${Date.now().toString(36)}-${safe}`, '产物文件');
+    if (fs.existsSync(file) && fs.lstatSync(file).isSymbolicLink()) throw new Error('产物文件不能是符号链接');
     fs.writeFileSync(file, String(content), 'utf8');
     return file;
   }
 
   readArtifact(file) {
     const abs = path.resolve(file);
-    if (!abs.startsWith(path.resolve(this.artifactsDir))) throw new Error('只能读取产物目录内的文件');
-    return fs.readFileSync(abs, 'utf8');
+    const root = path.resolve(this.artifactsDir);
+    const rel = path.relative(root, abs);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('只能读取产物目录内的文件');
+    // 读现有文件时再校验一次真实路径，防止目录内的符号链接指向外部。
+    const realRoot = fs.realpathSync(root);
+    const real = fs.realpathSync(abs);
+    const realRel = path.relative(realRoot, real);
+    if (realRel.startsWith('..') || path.isAbsolute(realRel)) throw new Error('只能读取产物目录内的文件');
+    return fs.readFileSync(real, 'utf8');
   }
 
   listArtifacts(sessionId) {

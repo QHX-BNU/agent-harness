@@ -95,7 +95,10 @@ function crossGroupBlocked(ctx) {
  * 规则：私聊会话只有它自己能读到——群里的人（哪怕在同一个工作区）查不到别人私聊说了什么。
  */
 function visibleSessions(ctx) {
-  const all = ctx.store.list({ workspaceId: ctx.workspaceId === 'default' ? null : ctx.workspaceId });
+  // default 也是一个真实的工作区 id，不能把它翻译成 null（null 在 store 里表示“不过滤”）。
+  // 否则默认工作区里的 session_list/user_activity 会枚举出所有工作区。
+  const workspaceId = ctx.workspaceId || ctx.session?.workspaceId || 'default';
+  const all = ctx.store.list({ workspaceId });
   const selfId = ctx.session?.id;
   return all.filter((s) => {
     if (ctx.config?.privateIsolation === false) return true;
@@ -217,6 +220,10 @@ export const sessionRead = {
     if (blocked) return blocked;
     const s = ctx.store.get(String(session));
     if (!s) throw new Error(`没有这个会话：${session}`);
+    const workspaceId = ctx.workspaceId || ctx.session?.workspaceId || 'default';
+    if ((s.workspaceId || 'default') !== workspaceId) {
+      return '这个会话属于另一个工作区，不能跨工作区读取。';
+    }
     // 私聊会话不许被别人读（哪怕是同一个工作区）
     if (ctx.config?.privateIsolation !== false && s.channel?.type === 'feishu' && s.channel.chatType === 'p2p' && s.id !== ctx.session?.id) {
       return '这是别人的私聊会话，出于隐私保护不能读取。只能看群里的讨论，或者你自己的私聊。';

@@ -217,8 +217,8 @@ section('[5] 沙箱集成');
   const ctx = { session: { id: 'net', workspaceId: 'default' }, sandbox: off, config: { workspace: tmp }, workspaceId: 'default', emit: () => {} };
   const denied = await tools.execute('run_shell', { command: 'curl -s https://example.com' }, ctx);
   ok(
-    'run_shell 返回沙箱拒绝而不是执行结果',
-    /沙箱拒绝/.test(denied.content) && !/DOCTYPE|<html|TARGET-OK/i.test(denied.content),
+    'run_shell 返回失败状态与沙箱拒绝，而不是执行结果',
+    !denied.ok && /沙箱拒绝/.test(denied.content) && !/DOCTYPE|<html|TARGET-OK/i.test(denied.content),
     denied.content.slice(0, 60),
   );
 

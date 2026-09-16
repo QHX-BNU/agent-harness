@@ -42,12 +42,22 @@ section('[2] 跨平台编码（最容易翻车的地方）');
   ok('run.cmd 是纯 ASCII', nonAscii === 0, nonAscii ? `${nonAscii} 个非 ASCII 字节（cmd.exe 会解析崩）` : 'cmd.exe 按 OEM 代码页读也没问题');
   ok('run.cmd 只负责转发到 PowerShell', /scripts\\run\.ps1/.test(cmd) && cmd.split('\n').filter((l) => l.trim() && !l.trim().startsWith('REM') && !l.startsWith('@')).length <= 2);
 
-  for (const [name, buf] of [
-    ['scripts/run.ps1', readBytes('scripts/run.ps1')],
-    ['scripts/setup-runtime.ps1', readBytes('scripts/setup-runtime.ps1')],
+  // Windows PowerShell 5.1 对「没有 BOM 的 .ps1」按 ANSI 代码页解码：中文会变乱码，
+  // 乱码里若出现引号/花括号就会直接解析失败（沙箱执行器踩过这个坑）。要么纯 ASCII，要么带 BOM。
+  for (const name of [
+    'scripts/run.ps1',
+    'scripts/setup-runtime.ps1',
+    'scripts/docker-run.ps1',
+    'scripts/windows-sandbox-runner.ps1',
   ]) {
+    const buf = readBytes(name);
     const bom = buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf;
-    ok(`${name} 带 UTF-8 BOM`, bom, bom ? 'PowerShell 5.1 才能正确读中文' : '没 BOM → PS 5.1 按 ANSI 读，中文会乱码');
+    const nonAscii = [...buf].filter((b) => b > 127).length;
+    ok(
+      `${name} 编码适合 PowerShell 5.1`,
+      bom || nonAscii === 0,
+      bom ? '带 UTF-8 BOM' : nonAscii === 0 ? '纯 ASCII，不需要 BOM' : `有 ${nonAscii} 个非 ASCII 字节但没 BOM → PS 5.1 会读崩`,
+    );
   }
 
   for (const f of ['run.sh', 'scripts/setup-runtime.sh']) {

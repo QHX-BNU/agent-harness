@@ -1,0 +1,42 @@
+# Source-control and editor state
+.git
+.gitattributes
+.gitignore
+.github/
+.vscode/
+
+# Runtime state and secrets: never bake these into an image
+.sessions/
+.sessions-test/
+.sessions-trash/
+.artifacts/
+.artifacts-test/
+.channels/
+.memory/
+.sandbox-tmp/
+.workspaces.json
+.runtime-model.json
+.lark-app-secret
+.env
+.env.*
+
+# Host-only bundled runtime and dependency/test outputs
+runtime/bin/
+runtime/VERSION
+node_modules/
+e2e/
+ui-check/
+demo/
+out/
+trace/
+docs/
+*.log
+
+# Docker tooling is copied explicitly where needed
+Dockerfile*
+docker-compose*.yml
+docker-run.cmd
+docker-run.sh
+scripts/docker-run.ps1
+scripts/docker-check.js
+scripts/docker-smoke.js

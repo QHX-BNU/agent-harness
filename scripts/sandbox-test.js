@@ -109,15 +109,24 @@ section('[4] 环境变量清洗（不把密钥暴露给子进程）');
 }
 
 // ================= 5. 后端构造 =================
-section('[5] 执行后端（local / docker / wsl）');
+section('[5] 执行后端（windows / local / docker / wsl）');
 {
   const sb = createSandbox({ scope: 'workspace', workspace: WS });
   const local = sb.buildExec('node -v');
   ok('local 后端可执行文件正确', local.backend === 'local' && /powershell|sh/.test(local.file), local.file);
   ok('local 后端 cwd 在作用区域内', local.cwd === WS, local.cwd);
 
+  if (process.platform === 'win32') {
+    const native = createSandbox({ scope: 'workspace', workspace: WS, backend: 'windows', tempDir: path.join(os.tmpdir(), 'sb-native-tmp') }).buildExec('node -v');
+    ok('Windows 原生后端走项目内执行器', native.backend === 'windows' && native.file === 'powershell.exe' && native.args.includes('-Request'));
+  } else {
+    ok('非 Windows 平台不会误报 Windows 原生后端可用', createSandbox().describe().backends.find((b) => b.id === 'windows').available === false);
+  }
+
   const docker = createSandbox({ scope: 'workspace', workspace: WS, backend: 'docker', image: 'alpine:3' }).buildExec('ls');
   ok('docker 后端构造出挂载参数', docker.file === 'docker' && docker.args.includes('-v') && docker.args.some((a) => a.endsWith(':/work')));
+  ok('docker 后端使用非 root + 只读根文件系统', docker.args.includes('--user') && docker.args.includes('--read-only'));
+  ok('docker 后端限制 capability / 进程 / 内存 / CPU', ['--cap-drop', '--pids-limit', '--memory', '--cpus'].every((x) => docker.args.includes(x)));
   ok(
     'docker 后端网络跟随策略：all → bridge',
     (() => {
@@ -127,26 +136,40 @@ section('[5] 执行后端（local / docker / wsl）');
     })(),
   );
   ok(
-    'docker 后端网络跟随策略：off/白名单/黑名单 → none',
-    ['off', 'whitelist', 'blacklist'].every((mode) => {
-      const d = createSandbox({ scope: 'workspace', workspace: WS, backend: 'docker', image: 'alpine:3', network: mode }).buildExec('ls');
+    'docker 后端网络 off → none',
+    (() => {
+      const d = createSandbox({ scope: 'workspace', workspace: WS, backend: 'docker', image: 'alpine:3', network: 'off' }).buildExec('ls');
       const i = d.args.indexOf('--network');
       return i >= 0 && d.args[i + 1] === 'none';
-    }),
+    })(),
   );
+  ok('docker 白/黑名单不会伪装成已支持', ['whitelist', 'blacklist'].every((network) => {
+    try {
+      createSandbox({ scope: 'workspace', workspace: WS, backend: 'docker', network }).buildExec('ls');
+      return false;
+    } catch (err) {
+      return /暂不支持/.test(err.message);
+    }
+  }));
   ok('沙箱快照带上网络与隔离等级', (() => {
     const d = createSandbox({ scope: 'workspace', workspace: WS, network: 'off' }).describe();
     return d.network === 'off' && d.isolation?.level === 'policy' && Array.isArray(d.networkModes);
   })());
   ok('docker 后端带镜像', docker.args.includes('alpine:3'));
+  ok('沙箱快照保留自定义镜像', createSandbox({ backend: 'docker', image: 'custom/image:1' }).image === 'custom/image:1');
   const roDocker = createSandbox({ scope: 'workspace', workspace: WS, backend: 'docker', mode: 'readonly' }).buildExec('ls');
   ok('docker 只读时挂载 :ro', roDocker.args.some((a) => a.endsWith(':/work:ro')));
+
+  const multi = createSandbox({ scope: 'custom', customRoots: [WS, HOME], backend: 'docker' }).buildExec('ls', { cwd: HOME });
+  ok('docker custom scope 挂载全部 roots', multi.args.some((a) => a.endsWith(':/work')) && multi.args.some((a) => a.endsWith(':/roots/1')));
+  ok('docker cwd 映射到实际 root', multi.containerCwd === '/roots/1', multi.containerCwd);
 
   const wsl = createSandbox({ scope: 'workspace', workspace: WS, backend: 'wsl' }).buildExec('ls');
   ok('wsl 后端把路径映射到 /mnt', wsl.file === 'wsl.exe' && wsl.args.join(' ').includes('/mnt/'));
 
   const cat = sb.describe();
-  ok('后端可用性被如实上报', cat.backends.length === 3 && cat.backends[0].available === true, cat.backends.map((b) => `${b.id}:${b.available}`).join(' '));
+  ok('后端可用性被如实上报', cat.backends.length === 4 && cat.backends.some((b) => b.available), cat.backends.map((b) => `${b.id}:${b.available}`).join(' '));
+  ok('Windows 原生后端在 Windows 可用', process.platform !== 'win32' || cat.backends.find((b) => b.id === 'windows').available === true);
   ok('本地后端永远可用', cat.backends.find((b) => b.id === 'local').available === true);
 }
 
@@ -190,7 +213,7 @@ section('[7] 工具层：沙箱真的挡在工具前面');
   ok('run_shell 正常执行', shellOk.ok && /v24|v2[0-9]/.test(shellOk.content), shellOk.content.split('\n')[0]);
 
   const shellBad = await tools.execute('run_shell', { command: isWinPath() ? 'type C:\\Windows\\win.ini' : 'cat /etc/passwd' }, ctx);
-  ok('run_shell 越界命令被拒', !shellBad.ok === false || /沙箱拒绝/.test(shellBad.content), shellBad.content.slice(0, 60));
+  ok('run_shell 越界命令被拒且标记失败', !shellBad.ok && /沙箱拒绝/.test(shellBad.content), shellBad.content.slice(0, 60));
 
   const secret = await tools.execute('run_shell', { command: 'node -e "console.log(process.env.SANDBOX_TEST_SECRET || \'EMPTY\')"' }, ctx);
   ok('子进程看不到密钥变量', /EMPTY/.test(secret.content), secret.content.replace(/\n/g, ' ').slice(0, 60));
@@ -204,7 +227,7 @@ let createdSessionId = null;
 section('[8] HTTP 与界面');
 {
   const cat = await (await fetch(`${BASE}/api/sandbox`)).json();
-  ok('GET /api/sandbox 返回目录', cat.presets.length === 4 && cat.backends.length === 3, cat.presets.map((p) => p.id).join(','));
+  ok('GET /api/sandbox 返回目录', cat.presets.length === 4 && cat.backends.length === 4, cat.presets.map((p) => p.id).join(','));
   ok('返回默认配置与工作区', Boolean(cat.defaults && cat.workspace));
 
   const t = await (await fetch(`${BASE}/api/sandbox/test`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: 'workspace', mode: 'readonly' }) })).json();
@@ -259,7 +282,7 @@ section('[8] HTTP 与界面');
     );
     ok('界面有 4 种作用区域可选', ui.scopes === 4);
     ok('界面有 2 种权限可选', ui.modes === 2);
-    ok('界面列出 3 种后端并标注不可用', ui.backends.length === 3 && ui.backends.find((b) => b.v === 'local').off === false, JSON.stringify(ui.backends));
+    ok('界面列出 4 种后端并标注不可用', ui.backends.length === 4 && ui.backends.find((b) => b.v === 'local').off === false, JSON.stringify(ui.backends));
     ok('输入区显示沙箱徽标', /🔒/.test(ui.badge), ui.badge);
     ok('预览显示实际根目录', ui.preview.includes('作用区域'), ui.preview.replace(/\s+/g, ' ').slice(0, 60));
 

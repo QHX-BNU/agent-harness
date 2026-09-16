@@ -1,0 +1,56 @@
+name: mini-harness
+
+services:
+  harness:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUN_VERSION: ${BUN_VERSION:-1.4.2}
+    image: mini-harness:${HARNESS_TAG:-local}
+    restart: unless-stopped
+    init: true
+
+    # The service has no authentication. Keep it loopback-only unless a trusted
+    # reverse proxy adds authentication and TLS in front of it.
+    ports:
+      - "127.0.0.1:${HARNESS_PORT:-5175}:5175"
+
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HOST: 0.0.0.0
+      PORT: 5175
+      WORKSPACE: /workspace
+      SESSIONS_DIR: /data/.sessions
+      TRASH_DIR: /data/.sessions-trash
+      ARTIFACTS_DIR: /data/.artifacts
+      MEMORY_DIR: /data/.memory
+      RUNTIME_MODEL_FILE: /data/.runtime-model.json
+      WORKFLOWS_DIR: /app/workflows
+      SANDBOX_BACKEND: local
+
+    volumes:
+      # Point HARNESS_WORKSPACE at the project the agent may edit. The default
+      # ./workspace avoids accidentally exposing this harness's own .env/state.
+      - type: bind
+        source: ${HARNESS_WORKSPACE:-./workspace}
+        target: /workspace
+      - type: volume
+        source: harness-data
+        target: /data
+
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: ${HARNESS_PIDS_LIMIT:-256}
+    mem_limit: ${HARNESS_MEMORY_LIMIT:-1g}
+    cpus: ${HARNESS_CPU_LIMIT:-2}
+
+volumes:
+  harness-data:

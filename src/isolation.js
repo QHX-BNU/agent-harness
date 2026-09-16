@@ -1,7 +1,8 @@
 // 隔离等级：说清楚「现在到底有没有真沙箱」，别让界面和文档含糊过去。
 //
-// 三个等级（强 → 弱）：
-//   container  容器/虚拟机：docker / wsl 后端，操作系统级隔离，最强
+// 四种边界：
+//   container  Docker 后端，或 harness 本身运行在容器里：操作系统级边界
+//   os         Windows Restricted Token + capability SID ACL + Job Object
 //   runtime    运行时强制：Node 权限模型（--permission）生效，fs/子进程由 V8 运行时拒绝
 //   policy     仅策略：路径作用域 + 命令扫描 + 环境变量清洗 —— 可被绕过，不是安全边界
 //
@@ -11,6 +12,40 @@ import os from 'node:os';
 import path from 'node:path';
 
 const isWin = process.platform === 'win32';
+
+/**
+ * 探测 harness 进程本身是否位于容器内。
+ *
+ * 不能只信环境变量（宿主机上随手设一个变量就会让 UI 撒谎），必须同时看到
+ * Docker/Podman/Kubernetes 留下的文件或 cgroup 证据。containerHint 只是用来说明
+ * 这是本项目镜像，不参与 active 判定。
+ */
+export function detectContainerRuntime({
+  exists = (p) => fs.existsSync(p),
+  read = (p) => fs.readFileSync(p, 'utf8'),
+  env = process.env,
+} = {}) {
+  if (isWin) return { active: false, engine: null, marker: null, imageHint: false };
+
+  const imageHint = env.MINI_HARNESS_CONTAINER === '1';
+  try {
+    if (exists('/.dockerenv')) return { active: true, engine: 'docker', marker: '/.dockerenv', imageHint };
+    if (exists('/run/.containerenv')) return { active: true, engine: 'podman', marker: '/run/.containerenv', imageHint };
+  } catch {
+    /* 继续看 cgroup */
+  }
+
+  for (const file of ['/proc/1/cgroup', '/proc/self/cgroup']) {
+    try {
+      const cgroup = read(file);
+      const hit = /(docker|containerd|kubepods|libpod|podman)/i.exec(cgroup);
+      if (hit) return { active: true, engine: hit[1].toLowerCase(), marker: file, imageHint };
+    } catch {
+      /* 这个平台没有 procfs */
+    }
+  }
+  return { active: false, engine: null, marker: null, imageHint };
+}
 
 /** Node 权限模型是否生效，以及它到底管住了什么 */
 export function detectRuntimeJail() {
@@ -68,23 +103,66 @@ export function jailFlags({ appDir, workspace, dataPaths = [], allowShell = fals
 }
 
 /** 给界面/接口用的总览 */
-export function isolationSummary({ sandbox = null, runtimeJail = null } = {}) {
+export function isolationSummary({
+  sandbox = null,
+  runtimeJail = null,
+  containerRuntime = null,
+  backendReady = null,
+  controllerExposed = false,
+} = {}) {
   const jail = runtimeJail || detectRuntimeJail();
+  const container = containerRuntime || detectContainerRuntime();
   const backend = sandbox?.backend || 'local';
   let level = 'policy';
   let label = '仅策略（不是真沙箱）';
   let detail = '路径作用域 + 命令扫描 + 环境变量清洗。可以被脚本内容、编码命令、管道等方式绕过。';
 
-  if (backend === 'docker' || backend === 'wsl') {
+  if (backend === 'windows' && backendReady !== false) {
+    level = 'os';
+    label = 'Windows 原生写入沙箱';
+    detail =
+      '模型命令使用受限令牌运行，Windows ACL 把写入限制在已授权根目录，Job Object 限制并收拢整棵进程树；读取仍继承当前用户权限，非 all 网络规则依赖代理，不能阻止刻意绕过代理的直连。';
+  } else if (backend === 'docker' && backendReady !== false) {
     level = 'container';
-    label = `容器隔离（${backend}）`;
-    detail = '命令在容器/子系统里执行，文件系统与进程与主机隔离。';
+    label = '命令容器隔离（Docker）';
+    detail = 'run_shell 命令在独立 Docker 容器里执行；文件工具仍由 harness 进程按路径策略执行。';
+  } else if (container.active) {
+    level = 'container';
+    label = `Harness 容器边界（${container.engine || 'container'}）`;
+    detail =
+      'Harness 与 shell 都在容器内，宿主机只暴露显式挂载的目录；容器内部的“仅工作区”范围仍由策略层执行，/data 等挂载不属于工作区安全边界。';
   } else if (jail.active && !jail.overPermissive) {
+    // 运行时强制要排在「后端不可用」前面：--jail 里就是这层边界在管文件读写，
+    // 不能因为配置的 shell 后端探测不到就把它说成「仅策略」。
     level = 'runtime';
     label = '运行时强制（Node 权限模型）';
     detail = jail.canSpawn
       ? '文件读写由 Node 运行时强制执行，超出白名单直接 ERR_ACCESS_DENIED；但允许了子进程，shell 里的操作仍可绕过。'
       : '文件读写由 Node 运行时强制执行，且禁止派生进程 —— agent 的文件操作与命令都被真正关住。';
+  } else if (backend === 'windows' && backendReady === false) {
+    label = 'Windows 原生沙箱不可用';
+    detail = '项目内原生执行器或 Windows PowerShell 不可用；命令会失败关闭，不会静默回落。';
+  } else if (backend === 'docker' && backendReady === false) {
+    label = 'Docker 后端不可用';
+    detail = '配置选择了 Docker，但当前没有可用的 Docker 守护进程；命令不会静默回落到宿主机执行。';
+  } else if (backend === 'wsl') {
+    label = 'WSL 子系统（非完整隔离）';
+    detail = '命令进入 WSL 执行，但 Windows 磁盘挂载和互操作通常仍可访问；它不是与宿主机隔绝的容器边界。';
   }
-  return { level, label, detail, runtimeJail: jail, backend };
+
+  // 可写范围包含控制器代码目录时，任何“隔离”描述都不能装作能保护 harness 自己。
+  if (controllerExposed) {
+    detail +=
+      ' ⚠ 当前可写范围包含控制器代码目录（harness 自己的 src/、scripts/、native/ 等）：模型改这里就等于改下次运行的代码，这个边界保护不了控制器自身。';
+  }
+  return {
+    level,
+    label,
+    detail,
+    runtimeJail: jail,
+    containerRuntime: container,
+    backend,
+    backendReady,
+    controllerExposed: Boolean(controllerExposed),
+  };
 }

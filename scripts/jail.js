@@ -6,7 +6,8 @@
 //
 // 为什么这样做：local 后端是「策略沙箱」，靠路径判断和命令扫描，可以被绕过（见 sandbox-breach-test）。
 // 权限模型是运行时强制的：工作区之外的 fs 调用会直接抛 ERR_ACCESS_DENIED，跟正则没关系。
-// 要更强的隔离（含子进程）用 docker/wsl 后端，或者把整个 harness 放进容器/虚拟机。
+// Windows 普通启动已有 Restricted Token + ACL + Job Object 原生后端；要隔离读取/网络，
+// 仍应使用 Docker/虚拟机，或让此 jail 完全禁用子进程。
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

@@ -1,5 +1,5 @@
-// 容器内自检：确认这个容器真的能跑 harness（而不是只是进程起来了）。
-// 用法（容器里）：node scripts/container-check.js
+// 运行环境自检；在 Bun 容器里还会验证容器标记与 Bun 运行时。
+// 用法：node scripts/runtime-check.js（容器内用 bun scripts/runtime-check.js）
 //
 // 检查项：运行时 / 工作区 / 数据目录 / 端口 / 沙箱边界 / 工具链（文件读写 + 命令执行）
 import fs from 'node:fs';
@@ -9,6 +9,7 @@ import path from 'node:path';
 
 import { config } from '../src/config.js';
 import { createSandbox } from '../src/sandbox.js';
+import { detectContainerRuntime } from '../src/isolation.js';
 import { createToolRegistry } from '../src/tools/index.js';
 
 let pass = 0;
@@ -28,6 +29,11 @@ section('[1] 运行时');
 {
   const major = Number(process.versions.node.split('.')[0]);
   ok('Node 版本 ≥ 18', major >= 18, `v${process.versions.node}`);
+  if (process.env.MINI_HARNESS_CONTAINER === '1') {
+    const container = detectContainerRuntime();
+    ok('官方 Bun 运行时正在执行', Boolean(process.versions.bun), process.versions.bun || process.execPath);
+    ok('检测到真实容器证据', container.active, `${container.engine || 'unknown'} · ${container.marker || 'no marker'}`);
+  }
   ok('代码目录可读', fs.existsSync(path.resolve('server.js')) && fs.existsSync(path.resolve('src/loop.js')));
   ok('公共资源可读', fs.existsSync(path.resolve('public/index.html')) && fs.existsSync(path.resolve('public/app.js')));
   ok('工作流目录存在', fs.existsSync(config.workflowsDir), config.workflowsDir);
@@ -91,13 +97,33 @@ section('[3] 端口');
     srv.once('listening', () => srv.close(() => resolve(true)));
     srv.listen(port, config.host);
   });
-  ok(`能监听 ${config.host}:${port}`, canBind, canBind ? '' : '端口被占用或权限不足（容器里要用 HOST=0.0.0.0）');
-  ok('监听地址适合容器（0.0.0.0 或 ::）', config.host === '0.0.0.0' || config.host === '::', `HOST=${config.host}（127.0.0.1 在容器里外部访问不到）`);
+  let existingHarness = false;
+  if (!canBind) {
+    try {
+      const probeHost = ['0.0.0.0', '::'].includes(config.host) ? '127.0.0.1' : config.host;
+      const response = await fetch(`http://${probeHost}:${port}/api/config`, { signal: AbortSignal.timeout(1500) });
+      const body = await response.json();
+      existingHarness = response.ok && typeof body === 'object' && body !== null && 'provider' in body;
+    } catch {
+      existingHarness = false;
+    }
+  }
+  ok(
+    `端口 ${config.host}:${port} 可用`,
+    canBind || existingHarness,
+    canBind ? '可监听' : existingHarness ? '已有 mini-harness 正在监听' : '被其它程序占用或权限不足',
+  );
+  const container = detectContainerRuntime();
+  if (container.active || process.env.MINI_HARNESS_CONTAINER === '1') {
+    ok('容器监听地址可从宿主访问', config.host === '0.0.0.0' || config.host === '::', `HOST=${config.host}`);
+  } else {
+    ok('宿主机监听地址不会意外暴露公网', ['127.0.0.1', 'localhost', '::1'].includes(config.host), `HOST=${config.host}`);
+  }
 }
 
 section('[4] 沙箱边界');
 {
-  const sb = createSandbox({ scope: 'workspace', workspace: config.workspace, mode: 'write' });
+  const sb = createSandbox({ ...(config.sandbox || {}), scope: 'workspace', workspace: config.workspace, mode: 'write' });
   const inside = sb.resolve('inside-check.txt', { forWrite: true });
   ok('工作区内路径放行', inside.startsWith(config.workspace), path.relative(config.workspace, inside) || '.');
   let denied = false;
@@ -124,27 +150,34 @@ section('[4] 沙箱边界');
 section('[5] 工具链（真跑一次）');
 {
   const tools = createToolRegistry();
-  const session = { id: 'container-check', workspaceId: 'default' };
+  const session = { id: 'runtime-check', workspaceId: 'default' };
   const ctx = {
     session,
     config,
     workspaceId: 'default',
-    sandbox: createSandbox({ scope: 'workspace', workspace: config.workspace, mode: 'write' }),
+    sandbox: createSandbox({
+      ...(config.sandbox || {}),
+      scope: 'workspace',
+      workspace: config.workspace,
+      mode: 'write',
+      tempDir: path.join(config.sessionsDir, '..', '.sandbox-tmp'),
+      sessionId: session.id,
+    }),
     emit: () => {},
   };
 
-  const target = path.join(config.workspace, '.container-check.txt');
-  const w = await tools.execute('write_file', { path: '.container-check.txt', content: 'hello from container\n' }, ctx);
+  const target = path.join(config.workspace, '.runtime-check.txt');
+  const w = await tools.execute('write_file', { path: '.runtime-check.txt', content: 'hello from runtime\n' }, ctx);
   ok('write_file 能写工作区', w.ok && fs.existsSync(target), w.ok ? path.basename(target) : w.content.slice(0, 60));
 
-  const r = await tools.execute('read_file', { path: '.container-check.txt' }, ctx);
-  ok('read_file 能读回来', r.ok && /hello from container/.test(r.content));
+  const r = await tools.execute('read_file', { path: '.runtime-check.txt' }, ctx);
+  ok('read_file 能读回来', r.ok && /hello from runtime/.test(r.content));
 
   const l = await tools.execute('list_dir', { path: '.' }, ctx);
-  ok('list_dir 能列目录', l.ok && l.content.includes('container-check.txt'));
+  ok('list_dir 能列目录', l.ok && l.content.includes('runtime-check.txt'));
 
-  const sh = await tools.execute('run_shell', { command: 'echo container-shell-ok' }, ctx);
-  ok('run_shell 能执行命令', sh.ok && /container-shell-ok/.test(sh.content), (sh.content.split('\n')[1] || '').slice(0, 40));
+  const sh = await tools.execute('run_shell', { command: 'echo runtime-shell-ok' }, ctx);
+  ok('run_shell 能执行命令', sh.ok && /runtime-shell-ok/.test(sh.content), (sh.content.split('\n')[1] || '').slice(0, 40));
 
   try {
     fs.unlinkSync(target);
@@ -158,5 +191,5 @@ section('[5] 工具链（真跑一次）');
   }
 }
 
-console.log(`\n${fail === 0 ? '✓' : '✗'} 容器自检: ${pass} 通过 / ${fail} 失败`);
+console.log(`\n${fail === 0 ? '✓' : '✗'} 运行环境自检: ${pass} 通过 / ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);

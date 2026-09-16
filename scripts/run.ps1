@@ -6,8 +6,8 @@
 #   3. 系统里的 bun
 #   4. 都没有 → 下载一次 Bun 到项目里（约 38MB，之后不再下载）
 #
-# --jail：改用真沙箱启动（Node 权限模型），agent 的文件操作被运行时关在工作区内，
-#         代价是 shell 工具被禁用；加 --allow-shell 可以保留 shell，但隔离会降级。
+# Windows 普通启动默认使用项目内原生沙箱：模型命令进入 Restricted Token，
+# 无需 Docker、WSL、管理员权限或额外安装。--jail 保留为 Node 无 shell 的兼容模式。
 param(
   [Parameter(ValueFromRemainingArguments = $true)]
   [string[]]$Args
@@ -54,7 +54,7 @@ if ($useJail) {
   if (-not $nodeCmd) {
     Write-Host '[!] 真沙箱需要 Node（Node 的 --permission 权限模型），当前机器上没有找到。'
     Write-Host '    装一个 Node（≥20，https://nodejs.org）后再跑 run.cmd --jail；'
-    Write-Host '    或者按普通模式启动，并在设置里把「执行后端」换成 Docker / WSL。'
+    Write-Host '    或者按普通模式启动；Windows 会默认使用项目内原生执行沙箱。'
     exit 1
   }
   $jail = Join-Path $PSScriptRoot 'jail.js'

@@ -27,6 +27,9 @@ const { evalJs, waitFor, shot } = page;
 console.log(`界面: ${BASE}\n假厂商: ${FAKE}\n`);
 
 try {
+  // 供应商下拉是 /api/providers 回来之后才填的：只等按钮存在会在慢机器上抢跑
+  // （select 里还没有 custom，赋值会被丢掉）。
+  await waitFor(`document.body.dataset.ready === '1'`, '前端就绪');
   await waitFor(`!!document.getElementById('openSettings')`, '页面加载完成');
 
   // ---- 1. 打开设置，填入 key / 端点 / 模型 ----

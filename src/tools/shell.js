@@ -1,6 +1,7 @@
 // 执行类工具：能跑任意命令，所以它是沙箱与策略层重点盯的对象。
 // 沙箱在这里做三件事：cwd 必须在作用区域内、命令里不能出现区域外路径、环境变量被清洗。
-import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
 import { config } from '../config.js';
 import { safeResolve, rootOf } from './fs.js';
 import { utf8Prelude } from '../sandbox.js';
@@ -45,12 +46,12 @@ export const runShell = {
     // 2) 命令扫描：拦住「用命令绕出作用区域」，以及网络策略不允许的联网命令
     if (sandbox) {
       const check = sandbox.checkCommand(command, { cwd, tool: 'run_shell' });
-      if (!check.ok) return `沙箱拒绝执行：${check.reason}`;
+      if (!check.ok) return { ok: false, content: `沙箱拒绝执行：${check.reason}` };
       // 网络策略要走本地代理，等它绑定端口（非 all 模式才有）
       await sandbox.ready?.();
     }
 
-    // 3) 构造真正要跑的东西（本地 / docker / wsl），并带上清洗过的环境变量
+    // 3) 构造真正要跑的东西（Windows 原生 / local / docker / wsl），并带上清洗过的环境变量
     const spec = sandbox
       ? sandbox.buildExec(command, { cwd, tool: 'run_shell' })
       : isWin
@@ -66,6 +67,41 @@ export const runShell = {
     const started = Date.now();
     return await new Promise((resolve) => {
       let child;
+      let settled = false;
+      let timedOut = false;
+      let aborted = false;
+
+      const clearContainer = (force = false) => {
+        if (!spec.cidFile) return;
+        try {
+          const cid = fs.existsSync(spec.cidFile) ? fs.readFileSync(spec.cidFile, 'utf8').trim() : '';
+          if (force && cid) {
+            spawnSync('docker', ['rm', '-f', cid], {
+              env: spec.env,
+              stdio: 'ignore',
+              timeout: 10000,
+              windowsHide: true,
+            });
+          }
+        } catch {
+          /* 容器可能已经随 --rm 消失 */
+        }
+        try {
+          fs.rmSync(spec.cidFile, { force: true });
+        } catch {
+          /* 临时文件清理失败不覆盖真实执行结果 */
+        }
+      };
+
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        ctx?.signal?.removeEventListener?.('abort', onAbort);
+        clearContainer(false);
+        resolve(result);
+      };
+
       try {
         child = spawn(spec.file, spec.args, {
           cwd: spec.cwd,
@@ -76,13 +112,15 @@ export const runShell = {
       } catch (err) {
         // Node 权限模型（真隔离模式）会直接拒绝派生进程
         if (err.code === 'ERR_ACCESS_DENIED') {
-          return resolve(
-            '沙箱拒绝执行：当前运行在真隔离模式（Node 权限模型），**不允许派生进程**，shell 工具被运行时禁用。\n' +
+          return resolve({
+            ok: false,
+            content:
+              '沙箱拒绝执行：当前运行在真隔离模式（Node 权限模型），**不允许派生进程**，shell 工具被运行时禁用。\n' +
               '  要跑命令：用 --allow-shell 启动 jail（注意子进程不受权限模型约束、隔离会降级），' +
-              '或改用 docker / wsl 沙箱后端；文件读写仍然受权限模型强制约束。',
-          );
+              '或改用 Windows 原生 / docker / wsl 沙箱后端；文件读写仍然受权限模型强制约束。',
+          });
         }
-        return resolve(`命令启动失败：${err.message}`);
+        return resolve({ ok: false, content: `命令启动失败：${err.message}` });
       }
 
       let stdout = '';
@@ -96,29 +134,40 @@ export const runShell = {
       });
 
       const timer = setTimeout(() => {
+        timedOut = true;
+        clearContainer(true);
         child.kill('SIGKILL');
         stderr += `\n[超时 ${config.shellTimeoutMs}ms，进程已终止]`;
       }, config.shellTimeoutMs);
 
+      const onAbort = () => {
+        aborted = true;
+        clearContainer(true);
+        child.kill('SIGKILL');
+        stderr += '\n[请求已中止，进程已终止]';
+      };
+      if (ctx?.signal?.aborted) onAbort();
+      else ctx?.signal?.addEventListener?.('abort', onAbort, { once: true });
+
       child.on('error', (err) => {
-        clearTimeout(timer);
         if (err.code === 'ERR_ACCESS_DENIED' || /permission/i.test(err.message)) {
-          return resolve('沙箱拒绝执行：真隔离模式（Node 权限模型）不允许派生进程。用 --allow-shell 启动 jail，或改用 docker / wsl 后端。');
+          return finish({
+            ok: false,
+            content: '沙箱拒绝执行：真隔离模式（Node 权限模型）不允许派生进程。用 --allow-shell 启动 jail，或改用 Windows 原生 / docker / wsl 后端。',
+          });
         }
-        resolve(`命令启动失败：${err.message}`);
+        finish({ ok: false, content: `命令启动失败：${err.message}` });
       });
       child.on('close', (code) => {
-        clearTimeout(timer);
         const ms = Date.now() - started;
-        resolve(
-          [
+        const content = [
             `exit code: ${code}  (${ms}ms${spec.backend !== 'local' ? `, 沙箱后端 ${spec.backend}` : ''})`,
             stdout.trim() ? `--- stdout ---\n${stdout.trim()}` : '',
             stderr.trim() ? `--- stderr ---\n${stderr.trim()}` : '',
           ]
             .filter(Boolean)
-            .join('\n'),
-        );
+            .join('\n');
+        finish({ ok: code === 0 && !timedOut && !aborted, content });
       });
     });
   },

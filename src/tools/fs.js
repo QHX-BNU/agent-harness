@@ -251,7 +251,7 @@ export const grepFiles = {
       for (let i = 0; i < lines.length; i++) {
         if (re.test(lines[i])) {
           hits.push(`${r}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
-          if (hits.length >= Number(limit) || 60) break;
+          if (hits.length >= (Number(limit) || 60)) break;
         }
       }
       if (hits.length >= (Number(limit) || 60)) break;
