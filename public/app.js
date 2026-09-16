@@ -56,6 +56,7 @@
 
   const STORAGE_KEY = 'mini-harness.settings.v1';
   const DEFAULT_SETTINGS = {
+    settingsVersion: 2,
     provider: 'mock',
     approvalMode: 'ask',
     topK: 5,
@@ -77,6 +78,7 @@
     config: null,
     sandboxCatalog: null,
     settings: structuredClone(DEFAULT_SETTINGS),
+    activeWorkspace: { id: 'default', path: '' },
     live: { id: null, provider: '', model: '', messages: [], state: { status: 'idle', usage: {} } },
   };
 
@@ -158,22 +160,66 @@
   }
 
   function setStatus(status) {
-    els.statusPill.className = `pill ${status || 'idle'}`;
-    els.statusText.textContent = status || 'idle';
-    window.Panels?.setStatus(status);
+    const next = status || 'idle';
+    els.statusPill.className = `pill ${next}`;
+    els.statusText.textContent = next;
+    if (state.live?.state) state.live.state.status = next;
+    window.Panels?.setStatus(next);
   }
 
   // ---------- 设置 ----------
   function profileOf(id) {
+    if (!state.settings.profiles || typeof state.settings.profiles !== 'object') state.settings.profiles = {};
     state.settings.profiles[id] = state.settings.profiles[id] || {};
     return state.settings.profiles[id];
   }
+
+  /** 首次打开以服务端环境配置为准；localStorage 只代表用户之后的显式覆盖。 */
+  function serverDefaultSettings() {
+    const provider = state.config?.provider || DEFAULT_SETTINGS.provider;
+    const profile = {};
+    if (state.config?.model) profile.model = state.config.model;
+    if (state.config?.baseUrl) profile.baseUrl = state.config.baseUrl;
+    return {
+      ...structuredClone(DEFAULT_SETTINGS),
+      provider,
+      approvalMode: state.config?.approvalMode || DEFAULT_SETTINGS.approvalMode,
+      topK: Number.isFinite(Number(state.config?.memoryTopK)) ? Math.max(0, Math.min(20, Number(state.config.memoryTopK))) : DEFAULT_SETTINGS.topK,
+      profiles: Object.keys(profile).length ? { [provider]: profile } : {},
+      sandbox: {
+        ...structuredClone(DEFAULT_SETTINGS.sandbox),
+        ...(state.sandboxCatalog?.defaults || state.config?.sandbox || {}),
+      },
+    };
+  }
+
   function loadSettings() {
+    const defaults = serverDefaultSettings();
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) state.settings = { ...structuredClone(DEFAULT_SETTINGS), ...JSON.parse(raw) };
+      if (!raw) {
+        state.settings = defaults;
+        return false;
+      }
+      const saved = JSON.parse(raw);
+      const savedSandbox = saved?.sandbox && typeof saved.sandbox === 'object' ? { ...saved.sandbox } : {};
+      // v1 曾把 local 写成前端默认值，即使用户从未主动选择它。升级时只迁移这一种旧默认，
+      // 避免已有用户继续无感运行在可绕过的策略后端；迁移后仍可手动切回 local。
+      if ((Number(saved?.settingsVersion) || 1) < 2 && savedSandbox.backend === 'local' && defaults.sandbox.backend === 'windows') {
+        savedSandbox.backend = 'windows';
+      }
+      state.settings = {
+        ...defaults,
+        ...saved,
+        settingsVersion: 2,
+        profiles: { ...defaults.profiles, ...(saved?.profiles && typeof saved.profiles === 'object' ? saved.profiles : {}) },
+        sandbox: { ...defaults.sandbox, ...savedSandbox },
+      };
+      return true;
     } catch {
       /* 忽略损坏的本地配置 */
+      state.settings = defaults;
+      return false;
     }
   }
   function saveSettings() {
@@ -232,7 +278,11 @@
   function showSection(name) {
     document.querySelectorAll('.snav').forEach((b) => b.classList.toggle('active', b.dataset.sec === name));
     document.querySelectorAll('.spane').forEach((p) => p.classList.toggle('active', p.id === `sec-${name}`));
-    if (name === 'memory') window.Panels?.refreshMemory();
+    if (name === 'memory') {
+      window.Panels?.refreshChunks?.();
+      window.Panels?.refreshMemory();
+    }
+    if (name === 'skills') window.Panels?.refreshSkills?.();
     if (name === 'tools') window.Panels?.refreshTools();
     if (name === 'workflows') window.Panels?.refreshWorkflows();
     if (name === 'trash') window.Panels?.refreshTrash();
@@ -392,7 +442,9 @@
 
     els.sbScope.value = sb.scope || 'workspace';
     els.sbMode.value = sb.mode || 'write';
-    els.sbBackend.value = cat.backends.find((b) => b.id === (sb.backend || 'local') && b.available)?.id || 'local';
+    const wantedBackend = sb.backend || cat.defaults?.backend || 'local';
+    // 不可用的后端仍保持选中并明确标成「未安装」；绝不能悄悄降级到 local。
+    els.sbBackend.value = cat.backends.some((b) => b.id === wantedBackend) ? wantedBackend : 'local';
     els.sbRoots.value = (sb.customRoots || []).join('\n');
     els.sbStrict.checked = sb.strict !== false;
 
@@ -408,17 +460,8 @@
     els.sbNetworkList.value = (sb.networkList || []).join('\n');
     els.sbNetworkListField.hidden = !['whitelist', 'blacklist'].includes(els.sbNetwork.value);
 
-    // 隔离等级徽标：让「不是真沙箱」这件事显眼
-    const iso = cat.isolation;
-    if (iso) {
-      els.sbIsolation.className = `isolation-badge level-${iso.level}`;
-      const icon = { container: '🛡', runtime: '🔒', policy: '⚠' }[iso.level] || '•';
-      els.sbIsolation.textContent = `${icon} 隔离等级：${iso.label}`;
-      els.sbIsolation.title = iso.detail;
-    }
-
     els.sbRootsField.hidden = els.sbScope.value !== 'custom';
-    renderSandboxPreview();
+    renderSandboxPreview(readSandboxForm());
   }
 
   function readSandboxForm() {
@@ -437,6 +480,84 @@
         .map((s) => s.trim())
         .filter(Boolean),
     };
+  }
+
+  /**
+   * 表单尚未提交时服务端没有 describe() 可用，因此用 catalog 的真实环境探测加所选后端推导展示。
+   * 一旦收到 sandbox SSE 事件，就直接采用服务端返回的 isolation 快照。
+   */
+  function isolationFor(cfg = {}) {
+    if (cfg.isolation?.level) return cfg.isolation;
+    const cat = state.sandboxCatalog || {};
+    const backend = cfg.backend || cat.defaults?.backend || 'local';
+    const option = cat.backends?.find((b) => b.id === backend);
+    const base = cat.isolation || {};
+    const container = base.containerRuntime;
+    const jail = base.runtimeJail;
+
+    if (backend === 'windows') {
+      return option?.available
+        ? {
+            level: 'os',
+            label: 'Windows 原生写入沙箱',
+            detail: '受限令牌 + Windows ACL 强制写入范围，Job Object 收拢进程树；读取沿用当前用户权限，非 all 网络规则是代理级约束。',
+            backend,
+          }
+        : {
+            level: 'policy',
+            label: 'Windows 原生沙箱不可用',
+            detail: '项目内执行器或 Windows PowerShell 不可用；命令会失败关闭，不会回落到 local。',
+            backend,
+          };
+    }
+    if (backend === 'docker') {
+      return option?.available
+        ? {
+            level: 'container',
+            label: '命令容器隔离（Docker）',
+            detail: 'run_shell 命令在独立 Docker 容器里执行；文件工具仍由 harness 进程按路径策略执行。',
+            backend,
+          }
+        : {
+            level: 'policy',
+            label: 'Docker 后端不可用',
+            detail: '当前没有可用的 Docker 守护进程；配置会保留且请求会失败，不会静默回落到宿主机执行。',
+            backend,
+          };
+    }
+    if (container?.active) return { ...base, backend };
+    if (backend === 'wsl') {
+      return option?.available
+        ? {
+            level: 'policy',
+            label: 'WSL 子系统（非完整隔离）',
+            detail: '命令进入 WSL，但 Windows 磁盘挂载和互操作通常仍可访问；它不是完整容器边界。',
+            backend,
+          }
+        : {
+            level: 'policy',
+            label: 'WSL 后端不可用',
+            detail: '当前无法启动 WSL；配置会保留且请求会失败，不会静默回落到本地执行。',
+            backend,
+          };
+    }
+    if (jail?.active && !jail.overPermissive) return { ...base, backend };
+    return {
+      level: 'policy',
+      label: '仅策略（不是真沙箱）',
+      detail: '路径作用域 + 命令扫描 + 环境变量清洗。可以被脚本内容、编码命令、管道等方式绕过。',
+      backend,
+    };
+  }
+
+  function renderIsolation(cfg) {
+    const iso = isolationFor(cfg);
+    if (!els.sbIsolation || !iso) return iso;
+    els.sbIsolation.className = `isolation-badge level-${iso.level || 'policy'}`;
+    const icon = { container: '🛡', os: '🛡', runtime: '🔒', policy: '⚠' }[iso.level] || '•';
+    els.sbIsolation.textContent = `${icon} 隔离等级：${iso.label}`;
+    els.sbIsolation.title = iso.detail || '';
+    return iso;
   }
 
   /** 用当前表单的规则试一个主机名（不发出任何真实请求） */
@@ -477,7 +598,13 @@
     const scopeLabel = cat?.presets.find((p) => p.id === cfg.scope)?.label || cfg.scope;
     const modeLabel = cat?.modes.find((m) => m.id === cfg.mode)?.label || cfg.mode;
     const roots = applied?.roots || cfg.customRoots || [];
-    const rootLine = cfg.scope === 'workspace' ? (cat?.workspace || '工作区') : cfg.scope === 'home' ? cat?.home || '~' : roots.join(' · ') || '（未指定）';
+    const activeWorkspacePath = state.activeWorkspace?.path || window.Panels?.getActiveWorkspace?.()?.path || cat?.workspace;
+    const rootLine =
+      cfg.scope === 'workspace'
+        ? applied?.roots?.join(' · ') || activeWorkspacePath || '工作区'
+        : cfg.scope === 'home'
+          ? cat?.home || '~'
+          : roots.join(' · ') || '（未指定）';
     const netMode = cfg.network || 'all';
     const netLabel = cat?.networkModes?.find((m) => m.id === netMode)?.label || netMode;
     const netList = cfg.networkList || [];
@@ -489,16 +616,22 @@
         ['whitelist', 'blacklist'].includes(netMode) && netList.length
           ? ` · ${esc(netList.slice(0, 3).join(', '))}${netList.length > 3 ? ` 等 ${netList.length} 条` : ''}`
           : ''
-      }</div>`;
-    updateSandboxBadge(applied || cfg);
+      }</div>` +
+      // 可写范围圈进控制器代码目录时，别让界面假装还有隔离
+      (applied?.controller?.exposed
+        ? `<div style="color:var(--warn)">⚠ 可写范围包含控制器代码目录（${esc(applied.controller.appRoot || '')}）：改这里的代码就是改下次运行，边界保护不了 harness 自身</div>`
+        : '');
+    const iso = renderIsolation(cfg);
+    updateSandboxBadge(cfg, iso);
   }
 
-  function updateSandboxBadge(cfg) {
+  function updateSandboxBadge(cfg, iso = isolationFor(cfg)) {
     const cat = state.sandboxCatalog;
     const scopeLabel = cat?.presets.find((p) => p.id === cfg.scope)?.label || cfg.scope;
     const short = { workspace: '工作区', home: '主目录', custom: '自定义', full: '全盘' }[cfg.scope] || cfg.scope;
-    els.sbBadge.textContent = `🔒 ${short} · ${cfg.mode === 'readonly' ? '只读' : '可写'}`;
-    els.sbBadge.title = `沙箱：${scopeLabel} · ${cfg.mode === 'readonly' ? '只读' : '可写'} · 后端 ${cfg.backend || 'local'}`;
+    const backend = { windows: 'Windows 原生', local: 'local', docker: 'Docker', wsl: 'WSL' }[cfg.backend] || cfg.backend || 'local';
+    els.sbBadge.textContent = `🔒 ${short} · ${cfg.mode === 'readonly' ? '只读' : '可写'} · ${backend}`;
+    els.sbBadge.title = `沙箱：${scopeLabel} · ${cfg.mode === 'readonly' ? '只读' : '可写'} · 后端 ${backend} · ${iso?.label || ''}`;
     els.sbBadge.classList.toggle('ro', cfg.mode === 'readonly');
   }
 
@@ -539,6 +672,7 @@
           window.Panels?.setSessionId(ev.sessionId);
           window.Trace?.setSession(ev.sessionId);
         }
+        if (ev.workspaceId) window.Panels?.setActiveWorkspace?.(ev.workspaceId);
         break;
 
       case 'model':
@@ -550,7 +684,6 @@
 
       case 'state':
         setStatus(ev.status);
-        state.live.state.status = ev.status;
         if (ev.usage) state.live.state.usage = ev.usage;
         if (ev.costUsd !== undefined) state.live.state.costUsd = ev.costUsd;
         if (ev.lastError !== undefined) state.live.state.lastError = ev.lastError;
@@ -589,6 +722,8 @@
         break;
 
       case 'assistant_message':
+        // 普通对话已有 assistant_delta，不能重复；工作流只发最终 message，需要在这里补气泡。
+        if (!state.streaming && ev.content) addBubble('assistant', ev.content);
         state.streaming = null;
         break;
 
@@ -636,8 +771,8 @@
         const row = el('div', 'approval');
         const ok = el('button', 'ok mini', '允许执行');
         const no = el('button', 'err mini', '拒绝');
-        ok.onclick = () => settle(ev.id, true, row);
-        no.onclick = () => settle(ev.id, false, row);
+        ok.onclick = () => settle(ev.approvalId || ev.id, true, row);
+        no.onclick = () => settle(ev.approvalId || ev.id, false, row);
         row.append(ok, no);
         card.append(row);
         scrollDown();
@@ -765,7 +900,6 @@
 
       case 'sandbox':
         state.live.sandbox = ev;
-        updateSandboxBadge(ev);
         renderSandboxPreview(ev);
         break;
 
@@ -799,12 +933,30 @@
   }
 
   async function settle(id, approved, row) {
-    row.remove();
-    await fetch('/api/approve', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id, approved }),
-    });
+    const buttons = [...row.querySelectorAll('button')];
+    buttons.forEach((b) => (b.disabled = true));
+    try {
+      const response = await fetch('/api/approve', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id, approved }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      if (!result.ok) {
+        row.replaceChildren(el('span', 'dim', '审批已过期或已被处理'));
+        return;
+      }
+      row.remove();
+    } catch (err) {
+      buttons.forEach((b) => (b.disabled = false));
+      let hint = row.querySelector('.approval-error');
+      if (!hint) {
+        hint = el('span', 'approval-error');
+        row.append(hint);
+      }
+      hint.textContent = `提交失败：${err.message}`;
+    }
   }
 
   // ---------- 发送一轮 ----------
@@ -815,16 +967,45 @@
   function requestPayload(extra = {}) {
     const providerId = els.provider.value;
     const prof = profileOf(providerId);
+    const topK = Math.max(0, Math.min(20, Number(state.settings.topK) || 0));
     return {
       sessionId: state.sessionId,
+      workspaceId: state.activeWorkspace?.id || window.Panels?.getActiveWorkspaceId?.() || 'default',
       approvalMode: els.approvalMode.value,
       provider: providerId,
       model: els.model.value.trim() || undefined,
       apiKey: prof.apiKey || undefined,
       baseUrl: prof.baseUrl || undefined,
+      topK,
       sandbox: state.settings.sandbox || undefined,
       ...extra,
     };
+  }
+
+  /** Panels 切换工作区时同步路径；沙箱“仅工作区”预览必须跟着变。 */
+  function setWorkspace(workspace) {
+    if (!workspace) return;
+    state.activeWorkspace = {
+      id: workspace.id || 'default',
+      path: workspace.path || state.config?.workspace || '',
+      name: workspace.name || '',
+    };
+    renderSandboxPreview();
+  }
+
+  /** 给工作流等非 chat SSE 入口复用同一套忙碌态和停止按钮。 */
+  function beginExternalRun() {
+    if (state.running) return null;
+    const controller = new AbortController();
+    state.controller = controller;
+    setBusy(true);
+    return controller;
+  }
+
+  function endExternalRun(controller) {
+    if (state.controller !== controller) return;
+    state.controller = null;
+    setBusy(false);
   }
 
   async function send(text) {
@@ -897,8 +1078,11 @@
   }
 
   async function loadSession(id) {
-    const session = await (await fetch(`/api/sessions/${id}`)).json();
+    const response = await fetch(`/api/sessions/${id}`);
+    const session = await response.json();
+    if (!response.ok || session.error) throw new Error(session.error || `HTTP ${response.status}`);
     state.sessionId = id;
+    if (session.workspaceId) window.Panels?.setActiveWorkspace?.(session.workspaceId);
     els.messages.innerHTML = '';
     const cards = new Map();
     for (const m of session.messages) {
@@ -1024,10 +1208,10 @@
   els.syncModel.onclick = syncModelToServer;
   els.saveSettings.onclick = commitSettings;
   els.resetSettings.onclick = () => {
-    state.settings = structuredClone(DEFAULT_SETTINGS);
+    state.settings = serverDefaultSettings();
     saveSettings();
-    openModal();
     applySettings();
+    openModal();
     els.testResult.textContent = '';
   };
   els.sbScope.onchange = () => {
@@ -1070,7 +1254,19 @@
     );
   });
 
-  window.Chat = { handleEvent, loadSession, newSession, addBubble, reset: newSession, requestPayload, state };
+  window.Chat = {
+    handleEvent,
+    loadSession,
+    newSession,
+    addBubble,
+    reset: newSession,
+    requestPayload,
+    setWorkspace,
+    setStatus,
+    beginExternalRun,
+    endExternalRun,
+    state,
+  };
 
   // ---------- 启动 ----------
   (async () => {
@@ -1083,6 +1279,7 @@
       state.config = cfg;
       state.providers = providers;
       state.sandboxCatalog = sandbox;
+      state.activeWorkspace = { id: 'default', path: cfg.workspace || '', name: '默认工作区' };
       els.workspace.textContent = cfg.workspace;
 
       els.provider.innerHTML = '';
@@ -1099,12 +1296,9 @@
       }
 
       loadSettings();
-      if (!state.settings.profiles[cfg.provider] && !providerInfo(cfg.provider)?.ready) {
-        // 环境变量里配了默认供应商但没有 key 记录时，仍然跟随服务端默认
-      }
       state.settings.provider = state.settings.provider || cfg.provider;
       if (!providerInfo(state.settings.provider)) state.settings.provider = cfg.provider;
-      if (!state.settings.profiles[state.settings.provider]?.model && cfg.model) {
+      if (state.settings.provider === cfg.provider && !state.settings.profiles[state.settings.provider]?.model && cfg.model) {
         profileOf(state.settings.provider).model = cfg.model;
       }
       applySettings();

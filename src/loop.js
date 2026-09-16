@@ -20,6 +20,7 @@ export async function runTurn({
   config,
   signal,
   memory = null,
+  skills = null,
   agents = null,
   workflows = null,
   sandbox = null,
@@ -67,6 +68,10 @@ export async function runTurn({
     }
   }
 
+  // ---- 常驻画像 / 技能清单：在每步开头重算（见下面的循环），所以这里只放签名 ----
+  let profileSig = null;
+  let skillsSig = null;
+
   // modelConfig：本次请求实际使用的模型凭证（provider/model/baseUrl/apiKey）。
   // 子代理与工作流必须复用它，否则会退回服务端环境变量——前端填的 key 就丢了。
   // workspaceId：会话所属工作区，决定 workspace 级记忆的读写范围。
@@ -74,6 +79,7 @@ export async function runTurn({
     session,
     store,
     memory,
+    skills,
     agents,
     workflows,
     sandbox,
@@ -102,6 +108,35 @@ export async function runTurn({
       state.steps = steps;
       emit({ type: 'step', step: steps, maxSteps: config.maxSteps });
 
+      // ---- 0. 常驻画像与技能清单：每步重算，模型刚写进 user/soul/preference 的东西，
+      //         以及刚创建/安装的技能，下一步就能看到（只给名字+描述，全文按需 skill_read）----
+      let profileText = '';
+      if (memory && depth === 0 && config.memoryProfileEnabled !== false) {
+        try {
+          const profile = memory.profile({ maxChars: config.memoryProfileMaxChars });
+          profileText = profile.text;
+          if (profileText && profileText !== profileSig) {
+            profileSig = profileText;
+            emit({ type: 'memory_profile', chars: profile.used, truncated: profile.truncated });
+          }
+        } catch (err) {
+          emit({ type: 'error', message: `画像注入失败（已忽略）：${err.message}` });
+        }
+      }
+      let skillList = [];
+      if (skills && config.skillsEnabled !== false) {
+        try {
+          skillList = skills.summary();
+          const sig = skillList.map((s) => s.name).join(',');
+          if (sig !== skillsSig) {
+            skillsSig = sig;
+            if (skillList.length) emit({ type: 'skills', count: skillList.length, names: skillList.map((s) => s.name) });
+          }
+        } catch (err) {
+          emit({ type: 'error', message: `技能清单读取失败（已忽略）：${err.message}` });
+        }
+      }
+
       // ---- 1. 组装上下文 ----
       const system = buildSystemPrompt({
         workspace: config.workspace,
@@ -111,6 +146,8 @@ export async function runTurn({
         approvalMode: session.approvalMode || config.approvalMode,
         model: session.model,
         memoryText,
+        profileText,
+        skills: skillList,
         todos: session.todos,
       });
       const history = trimHistory(session.messages, config.maxHistoryChars);

@@ -48,6 +48,7 @@ export function createFeishuChannel({
   workspaces,
   tools,
   memory,
+  skills = null,
   agents,
   workflows,
   broker,
@@ -452,6 +453,7 @@ export function createFeishuChannel({
         config: turnConfig,
         signal: new AbortController().signal,
         memory,
+        skills,
         agents,
         workflows,
         // digest 工具用它把 open_id 还原成真实姓名

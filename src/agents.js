@@ -4,7 +4,7 @@ import { runTurn } from './loop.js';
 import { Policy } from './policy.js';
 import { STATUS, setStatus } from './state.js';
 
-export function createAgentRunner({ config, store, tools, memory, createProvider, policy }) {
+export function createAgentRunner({ config, store, tools, memory, skills = null, createProvider, policy }) {
   let running = 0;
   const waiters = [];
 
@@ -157,6 +157,7 @@ export function createAgentRunner({ config, store, tools, memory, createProvider
           signal,
           depth,
           memory,
+          skills, // 子代理也能看到技能清单、读技能全文（画像只在主会话注入）
           sandbox, // 子代理继承父级的作用区域，不能自己放宽
           agents: null, // 子代理不能再用 task 工具（深度限制已在上层保证，这里再收一道）
         });

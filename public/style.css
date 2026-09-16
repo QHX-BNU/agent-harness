@@ -667,6 +667,28 @@ code.inline {
 .mem-item .meta { display: flex; justify-content: space-between; color: var(--dim-2); font-size: 10.5px; font-family: var(--mono); margin-bottom: 4px; }
 .mem-item .del { cursor: pointer; color: var(--dim-2); }
 .mem-item .del:hover { color: var(--err); }
+.mem-item .acts { display: flex; gap: 8px; }
+.mem-item .acts span { cursor: pointer; color: var(--dim-2); }
+.mem-item .acts span:hover { color: var(--brand); }
+
+/* 三块常驻画像（user.md / soul.md / preference.md） */
+.mem-chunks { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.mem-chunk { border: 1px solid var(--border-soft); border-left: 3px solid var(--brand); border-radius: 10px; padding: 8px 10px; background: var(--surface-2); font-size: 12px; }
+.mem-chunk-head { display: flex; align-items: center; gap: 8px; }
+.mem-chunk-head .dim { flex: 1; font-size: 10.5px; font-family: var(--mono); }
+.mem-chunk > .dim { font-size: 11px; margin-top: 3px; }
+.mem-chunk textarea { width: 100%; margin-top: 6px; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; }
+.mem-chunk .row { margin-top: 6px; gap: 6px; }
+
+/* 技能 */
+.skill-list { display: flex; flex-direction: column; gap: 7px; font-size: 12px; max-height: 40vh; overflow-y: auto; margin-top: 10px; }
+.skill-view {
+  margin-top: 10px; max-height: 34vh; overflow: auto; padding: 10px; white-space: pre-wrap;
+  border: 1px solid var(--border-soft); border-radius: 10px; background: var(--surface-2);
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
+}
+#skillZip { font-size: 11.5px; }
+#skillBody { width: 100%; margin-top: 6px; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; }
 
 .add { margin-top: 12px; font-size: 12px; }
 .add summary { cursor: pointer; color: var(--dim); padding: 4px 0; user-select: none; }
@@ -762,6 +784,7 @@ button.link-btn:hover { text-decoration: underline; background: transparent; bor
   background: var(--surface-2);
 }
 .isolation-badge.level-container { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+.isolation-badge.level-os { color: var(--cyan); border-color: color-mix(in srgb, var(--cyan) 40%, var(--border)); background: color-mix(in srgb, var(--cyan) 7%, var(--surface-2)); }
 .isolation-badge.level-runtime { color: var(--cyan); border-color: color-mix(in srgb, var(--cyan) 40%, var(--border)); }
 .isolation-badge.level-policy { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); background: color-mix(in srgb, var(--warn) 8%, var(--surface-2)); }
 

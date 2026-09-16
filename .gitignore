@@ -27,5 +27,11 @@ demo/
 out/
 trace/
 
+# docker-compose 的安全默认工作区（只保留占位文件）
+workspace/*
+!workspace/.gitkeep
+
 node_modules/
 *.log
+# 技能（技能包 = 目录 + SKILL.md，属运行态数据；要备份就用 GET /api/skills/:name/export）
+.skills/

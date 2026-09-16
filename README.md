@@ -21,6 +21,10 @@
 |---|---|
 | ![工作区](docs/ui-workspaces.png) | ![沙箱](docs/ui-sandbox.png) |
 
+| 记忆 · 三块常驻画像 | 技能 · zip 安装与自生成 |
+|---|---|
+| ![记忆分块](docs/ui-memory-chunks.png) | ![技能](docs/ui-skills.png) |
+
 | Trace 面板 | 回收站与备份 |
 |---|---|
 | ![Trace 面板](docs/ui-trace-tab.png) | ![设置](docs/ui-settings.png) |
@@ -32,7 +36,7 @@
 └────────────────────────────────────────┘
         ↓ SSE 事件流              ↑ REST
 ┌──────────── server.js ─────────────────┐
-│ /api/chat /api/sessions /api/memory …  │
+│ /api/chat /api/sessions /api/memory /api/skills … │
 └────────────────────────────────────────┘
         ↓
 ┌──────────── 内核 ──────────────────────┐
@@ -53,17 +57,18 @@
 | 控制循环 | `src/loop.js` | 模型→工具→模型往返、步数预算、并发/串行工具执行、审批挂起、中止、trace 落盘 |
 | 状态机 | `src/state.js` | `idle / running / awaiting_approval / aborted / error`、轮次步数、token 与成本聚合 |
 | 模型端口 | `src/providers/` | 15 家预设 + 3 种协议、超时/指数退避重试、错误归一化、`ping()` 自检、`listModels()` |
-| 上下文 | `src/context.js` | 系统提示组装（工具分类 + 记忆 + 清单）、按 turn 裁剪历史、超长结果落盘 |
-| 记忆 | `src/memory.js` | 分层（global/workspace/session）、词元重叠+重要度+时效检索、自动召回、加载统计 |
-| 工具 | `src/tools/` | 7 类 15 个内置工具、注册/启用开关、统一错误归一化、ctx 注入 |
+| 上下文 | `src/context.js` | 系统提示组装（工具分类 + 常驻画像 + 召回记忆 + 技能清单 + 待办）、按 turn 裁剪历史、超长结果落盘 |
+| 记忆 | `src/memory.js` | 三块常驻画像（`user.md`/`soul.md`/`preference.md`，可直接手改）+ 结构化记忆分层（global/workspace/session）、词元重叠+重要度+时效检索、自动召回、加载统计 |
+| 技能 | `src/skills.js`、`src/zip.js` | 技能包（目录 + `SKILL.md`）：zip 安装（zip-slip/符号链接/体积校验）、自己生成、导出、渐进披露加载；零依赖 zip 读写（store + deflate） |
+| 工具 | `src/tools/` | 8 类 26 个内置工具、注册/启用开关、统一错误归一化、ctx 注入 |
 | 策略 | `src/policy.js` | 按类别判定 allow/ask/deny、危险命令硬拦、异步审批 broker（超时=拒绝） |
 | 子代理 | `src/agents.js` | 独立上下文派生、并发上限、递归深度限制、结论回传、**请求级凭证继承** |
 | 工作流 | `src/workflow.js` | JSON 定义、阶段串行/阶段内并行、`{{input}}`/`{{prev}}`/`{{steps.x}}` 模板 |
-| **沙箱** | `src/sandbox.js` | 作用区域（工作区/主目录/自定义/全盘）、只读模式、命令扫描、环境变量清洗、审计、docker/wsl 后端 |
+| **沙箱** | `src/sandbox.js`、`native/windows-sandbox/` | Windows Restricted Token/ACL/Job Object 原生后端；作用区域、只读、命令扫描、环境清洗、审计；Docker/WSL 可选后端 |
 | 持久化 | `src/store.js` | 会话 JSON + 事件 JSONL + 产物文件，可恢复、可回放 |
 | Trace | `src/trace.js` | 事件摘要、JSONL / JSON 快照 / Markdown 三种导出格式 |
 | 事件 | `src/events.js` | 30+ 事件类型，同时喂 SSE 与终端彩色日志 |
-| 服务 | `server.js` | 20+ REST 端点 + 3 条 SSE 流 |
+| 服务 | `server.js` | 40+ REST 端点 + 3 条 SSE 流 |
 | 前端 | `public/` | 三栏布局、流式渲染、思考块、工具卡片、审批按钮、状态与 Trace 面板、设置弹窗 |
 | **Markdown** | `public/markdown.js` | 自研零依赖解析器：标题(h1-h6/setext) / 粗斜体 / 删除线 / 行内与围栏代码 / 有序无序嵌套列表 / 任务列表 / 引用(可嵌套) / 表格(对齐) / 链接图片自动链接 / 分隔线 / 硬换行 / 转义；先转义 HTML 再做解析，链接协议白名单 |
 
@@ -106,29 +111,82 @@ Mistral / SiliconFlow / Ollama / vLLM / LM Studio / 自定义 / mock），配置
 服务重启后 `GET /api/sessions/:id` 能原样恢复。前端左侧栏点任意会话即可续聊，
 运行中点「停止」会 `POST /api/sessions/:id/abort`。
 
-## 记忆：分层 + 自动召回 + 主动读写
+## 记忆：三块常驻画像 + 分层召回 + 主动读写
+
+记忆分两层，各管一件事：
+
+| 层 | 存哪 | 什么时候进上下文 | 放什么 |
+|---|---|---|---|
+| **画像**（profile） | `.memory/user.md`、`soul.md`、`preference.md` | **每轮都注入**（按 `MEMORY_PROFILE_MAX_CHARS` 截断） | 用户是谁 / 助手人格 / 用户偏好 |
+| **结构化** | `.memory/memory.json` | 按相关度召回 top-K（`MEMORY_TOP_K`，默认 5） | 项目约定、事实、场景、流程 |
 
 ```
 scope: global    所有会话可见（用户偏好、身份事实）
        workspace 仅本工作区（项目约定）
        session   仅本会话（当前上下文，不自动注入，避免污染下一轮）
 category: anchor / structure / knowledge / situation / self
+chunk:  user / soul / preference（画像文件；不带就是结构化记忆）
 ```
 
-- **自动召回**：每轮开始按用户输入检索 top-K（默认 5）注入系统提示，事件流里会看到
-  `memory_recall`，前端显示「🧠 自动召回 N 条记忆」。
-- **主动读写**：模型可用 `memory_add` / `memory_search` / `memory_list` 工具自己决定记什么。
-- **检索算法**：中英混合分词（中文单字+二元组，英文按词）→ 余弦式重叠 0.6 +
-  重要度 0.28 + 时效衰减 0.12。零依赖，够用。
-- **面板**：右侧「记忆」标签可搜索、新增、删除，并显示加载次数与分层统计。
+**三块画像文件**是一行一条的 markdown，人和模型都能直接编辑：
 
-## 工具：7 类 15 个
+```md
+# user.md · 关于用户
+
+<!-- 用户是谁、在什么环境里干活：身份、账号、机器/项目、长期约束。
+     一行一条；下面这些行可以直接手改 / 增删，下一轮会按行读回来。
+     行尾 <!-- ... --> 是元数据（id/重要度/标签），删掉会自动补一条新的。 -->
+- 用户在 GitHub 上是 QHX-BNU <!-- id=1 scope=global category=anchor importance=0.90 tags=身份 ts=… -->
+```
+
+- **md 是权威**：手改一行、删一行，下一轮就生效（加载时把文件解析回条目）；
+  没写元数据的行会自动补 id 并且只补一次（回写归一化，id 稳定不会每次重编号）。
+- **自动归块**：`scope=global` + `category=anchor` → `user.md`；`+ self` → `preference.md`；
+  其余进结构化记忆。也可以显式指定 `chunk`（`memory_add` 的 `chunk` 参数 / 界面上的下拉）。
+  画像条目一律按 `global` 处理，避免把「某个工作区的偏好」注入到别的会话。
+- **老数据自动迁移**：原来的 `memory.json` 里 global 的 anchor / self 条目会一次性搬进
+  对应的 md 文件，其余原地不动；`GET /api/memory/stats` 的 `migrated` 字段可以看到搬了哪些。
+- **工具**：`memory_add`（带 `chunk`）、`memory_search`、`memory_list`（可按 `chunk` 过滤）、
+  `memory_profile`（读三块原文）、`memory_update`、`memory_remove`。
+- **接口/界面**：设置 → 记忆，可以看到三块画像卡片（点「编辑」直接改 markdown 原文，
+  `PUT /api/memory/chunks/:name`），下面是结构化记忆列表。
+- **召回算法**：中英混合分词（中文单字+二元组，英文按词）→ 余弦式重叠 0.6 +
+  重要度 0.28 + 时效衰减 0.12。零依赖，够用；画像条目已经常驻，不参与召回（避免重复注入）。
+
+## 技能：zip 安装 + 自己生成 + 渐进披露
+
+技能 = 一个目录 + `SKILL.md`（可带 `scripts/`、模板等附件），默认落在项目的 `.skills/`。
+
+```
+.skills/
+  index.json                  # 名字/描述/何时用/文件清单/来源/hash
+  xhs-post/
+    SKILL.md                  # front matter: name / description / when / version + 正文
+    scripts/post.py
+```
+
+- **为什么不在工作区**：技能正文是控制器要读进提示词的东西。放进工作区 = 沙箱能改控制器的输入，
+  和「编译缓存不能放沙箱可写目录」是同一类问题，所以默认落在 `APP_ROOT/.skills`（可用 `SKILLS_DIR` 改）。
+- **渐进披露**：系统提示里只列 `名字: 描述（何时用）`，要用时模型自己 `skill_read` 读全文 ——
+  装 N 个技能也不会把上下文吃光。
+- **安装（zip）**：界面「设置 → 技能 → 安装 zip」，或 `POST /api/skills/install`（`zipBase64` / `zipPath` / `url`），
+  或模型自己调 `skill_install`。解压前会做：zip-slip 路径校验（`..`、绝对路径、盘符）、
+  符号链接拒绝、单文件 512KB / 整包 4MB / 200 个文件上限、必须含根目录 `SKILL.md`（外层目录会自动剥掉）。
+- **自己生成**：`skill_create`（或界面上的表单）直接写目录：`name` / `description` / `content`（SKILL.md 正文）/
+  `when` / `files`。适合把「刚跑通的一套流程」沉淀成技能，装完立刻出现在下一次对话的技能清单里。
+- **导出/分享**：`GET /api/skills/:name/export` 下载 zip，换台机器 `skill_install` 装回去即可（已测导出→重装闭环）。
+- **附件脚本不自动执行**：`scripts/` 只是文件，要跑就 `run_shell`，照样过沙箱与审批（`skill_install` /
+  `skill_create` / `skill_remove` 是写类工具，`ask` 模式下要人工确认；`skill_list` / `skill_read` 只读放行）。
+- **开关**：`SKILLS_ENABLED=0` 关掉（工具与接口都会明确回「已关闭」，不会静默假装）。
+
+## 工具：8 类 26 个
 
 | 类别 | 工具 | 说明 |
 |---|---|---|
 | fs | `list_dir` `read_file` `write_file` `edit_file` `glob` `grep` | `edit_file` 精确替换且拒绝多义匹配；路径越界一律拒绝 |
 | shell | `run_shell` | 超时终止、危险命令硬拦 |
-| memory | `memory_add` `memory_search` `memory_list` | 模型自主管理长期记忆 |
+| memory | `memory_add` `memory_search` `memory_list` `memory_profile` `memory_update` `memory_remove` | 模型自主管理长期记忆与三块画像 |
+| skill | `skill_list` `skill_read` `skill_install` `skill_create` `skill_remove` | zip 安装 / 自己生成 / 读全文；列表只列名字，正文按需读 |
 | plan | `todo_write` | 任务清单，实时渲染到右侧「任务」面板 |
 | agent | `task` | 委派子代理（独立上下文） |
 | workflow | `run_workflow` `workflow_list` | 跑多阶段流程 |
@@ -448,15 +506,21 @@ node scripts/setup-runtime.js            # 或者直接下载官方发行版
 node scripts/setup-runtime.js --check    # 看当前状态
 ```
 
-**隔离**：文件工具被沙箱限制在工作区内（越界路径、绝对路径、危险命令全部拒绝），
-命令执行会清洗环境变量；工作区就是 `run.cmd` 第一个参数指定的目录，换目录就等于换一块地盘。
+**Windows 隔离默认开箱即用**：Bun 控制器留在沙箱外，模型发起的 `run_shell` 会进入项目内的
+Windows 原生执行器（Restricted Token + capability SID ACL + Job Object）。不用 Docker、WSL、Node、
+管理员权限或额外下载；首次执行只用系统自带 Windows PowerShell 把项目内 16 KB C# 桥接代码编译到缓存。
+工作区就是 `run.cmd` 第一个参数指定的目录。
 
 想更严一层，就把 `APPROVAL_MODE=ask`（默认）留着——写文件和执行命令都要在界面上点「允许」。
 
 ## 沙箱：到底是不是真沙箱
 
-**先说结论：`local` 后端不是真沙箱**，它是策略层（路径作用域 + 命令扫描 + 环境变量清洗），
-可以被绕过。这不是猜的，`scripts/sandbox-breach-test.js` 会真的去打它：
+Windows 上默认的 `windows` 后端是**操作系统强制的写入/进程边界**，不依赖 Docker。它采用和
+Codex Windows 非管理员模式同类的结构：控制器在外，模型命令在受限令牌中；每组 roots + mode
+生成独立能力 SID，只给工作区和私有临时目录授予写权限，整棵子进程树放入 Job Object。
+
+旧的 `local` 后端仍保留作兼容，但它不是真沙箱，只是路径作用域 + 命令扫描 + 环境变量清洗，
+可以被编码命令等方式绕过。`scripts/sandbox-breach-test.js` 会真实攻击它：
 
 ```
 挡住 12 / 15，绕过 3
@@ -465,17 +529,21 @@ node scripts/setup-runtime.js --check    # 看当前状态
   ✗ 通过管道喂给解释器            ← payload 不落在命令行里
 ```
 
-所以有三个等级，界面顶部会明确显示你现在处于哪一级：
+界面顶部会明确显示当前是哪一种边界：
 
 | 等级 | 怎么开 | 强制力 | 代价 |
 |---|---|---|---|
-| 🛡 **容器** | `SANDBOX_BACKEND=docker` / `wsl` | 操作系统级隔离，文件和进程都在容器里 | 需要装 Docker / WSL |
+| 🛡 **Windows 原生** | 默认；`SANDBOX_BACKEND=windows` | Restricted Token + ACL 阻止越界写入，Job Object 限制进程数/内存并在中止时清理整棵进程树 | 工作区外读取仍沿用当前用户权限；网络规则是代理级 |
+| 🛡 **Docker 容器** | `SANDBOX_BACKEND=docker` | 独立文件系统/进程/网络命名空间 | 可选，需要已安装 Docker |
 | 🔒 **运行时强制** | `run.cmd --jail` / `./run.sh --jail` | **Node 权限模型**：工作区外的读写、列目录、派生进程全部被运行时直接拒绝（`ERR_ACCESS_DENIED`），跟正则无关 | **shell 工具被禁用**（加 `--allow-shell` 可保留，但隔离降级）；需要本机有 Node |
-| ⚠ **仅策略** | 默认 | 路径判断 + 命令扫描，能被上面三招绕过 | 无 |
+| ⚠ **WSL / local** | 手动选择 | WSL 仍可见 `/mnt/c`；local 只有策略检查 | 不是完整安全边界 |
 
 ```bash
-# 真沙箱模式（推荐）
-run.cmd --jail                       # Windows
+# Windows 原生沙箱（默认，保留 shell）
+run.cmd D:\my-project
+
+# Node 权限模型（禁用 shell）
+run.cmd --jail
 ./run.sh --jail ~/my-project          # Linux / macOS
 
 # 需要 shell 又想要文件强制隔离（注意：子进程不受权限模型约束）
@@ -491,8 +559,40 @@ run.cmd --jail --allow-shell
 ✓ 连无害命令也派不出去（spawn 本身被禁）  ✓ 拒绝过程留在 trace 里
 ```
 
-> Node 官方说明：权限模型是**限制访问**的机制，不宣称能对抗同进程内的恶意代码。
-> 要「不可绕过」，请用容器/虚拟机等级。
+Windows 原生后端的真实回归测试：
+
+```powershell
+node scripts/windows-sandbox-test.js
+# 20 项：run_shell、工作区写入（含改已有文件）、混淆越权写、派生进程、只读、
+#       编译缓存不可被沙箱改写、控制器代码目录告警、Job Object 进程树清理 等
+```
+
+编译产物（项目内 16 KB C# 桥接）会被控制器进程加载，所以它缓存在沙箱**写不到**的位置：
+
+| 位置 | 什么时候用 |
+|---|---|
+| `%LOCALAPPDATA%\mini-harness\sandbox-engine` | 默认；工作区/主目录都不覆盖它 |
+| `%ProgramData%\mini-harness\sandbox-engine` | 作用区域选「主目录」时（HOME 被授予写，不能用 LOCALAPPDATA） |
+| 不落盘、每次内存编译 | 候选位置全在可写范围里（例如自定义根目录覆盖了整块盘），此时宁可慢一点也不留可被替换的 DLL |
+
+同理，子进程的 `TEMP/TMP` 固定指到「本次被授予写的私有临时目录」：真实 `%TEMP%` 受限令牌写不进去，
+Windows PowerShell 在那里会退化成 ConstrainedLanguage，命令里的 .NET 调用会被拒。
+另外，同一条 roots+mode 只在 ACE 缺失时补写一次 ACL，不再每条命令重写一遍（几万文件的目录上
+从 ~2.2s 降到 ~1.0s，继承传播只做一次）。
+
+> 边界必须说清：Windows 原生后端当前强制的是**写入与进程树**，并不伪装成完整容器。
+> 工作区外读取仍沿用启动用户权限；`off/whitelist/blacklist` 通过受控代理执行，恶意程序可无视代理直连。
+> 需要同时隔离读取和网络时，Docker/虚拟机仍是更强选项，但不再是运行项目的前置依赖。
+>
+> 还有一条 ACL 修不了的边界：**可写范围圈进 harness 自己的代码目录时，这个边界保护不了控制器自身**。
+> 模型改 `src/`、`scripts/`、`native/`（无论用 shell 还是文件工具），下一次 `run_shell` / 重启都会执行它改过的代码。
+> 界面徽标、`/api/sessions/:id/sandbox`、启动日志都会显式标出这一点（`controller.exposed`）。
+> 默认 `run.cmd` 不带参数时工作区就是 harness 目录，所以默认会看到这条提醒 —— 想真正隔离，
+> 就把工作区指向别的项目目录（`run.cmd D:\my-project`）。
+
+副作用说明：授权过的根目录会留下一条「能力 SID」的 ACE（形如 `S-1-5-21-…:(OI)(CI)(M)`，
+继承到子项），这是写入边界的实现方式；同一组 roots+mode 只会复用同一个 SID，不会越攒越多。
+不想要的话可以手动删（`icacls <目录>` 看 SID，再 `icacls <目录> /remove:g *<SID>`）。
 
 ## 网络访问控制
 
@@ -537,7 +637,9 @@ node scripts/network-test.js      # 57 项
 | `.sessions/<id>.json` | 会话：消息、状态、用量、任务清单 |
 | `.sessions/<id>.events.jsonl` | 该会话的完整 trace（一行一个事件） |
 | `.sessions-trash/` | **回收站**：删掉的会话先挪到这里，可恢复 |
-| `.memory/memory.json` | 长期记忆 |
+| `.memory/memory.json` | 结构化长期记忆（按需召回） |
+| `.memory/user.md` `soul.md` `preference.md` | 三块常驻画像（每轮注入，可直接手改） |
+| `.skills/<name>/` | 技能包（SKILL.md + 附件），`index.json` 记元数据 |
 | `.artifacts/` | 超长工具结果的落盘产物 |
 
 启动日志会直接打出计数，方便确认：
@@ -579,11 +681,13 @@ Invoke-WebRequest 'http://127.0.0.1:5175/api/sessions/export' -OutFile "backup-$
 
 | 后端 | 是否真隔离 | 说明 |
 |---|---|---|
+| `windows` Windows 原生沙箱 | **写入/进程是** | **Windows 默认、免安装**；Restricted Token + 独立 capability SID ACL + Job Object；读取沿用当前用户 |
 | `local` 本地策略沙箱 | 否 | 路径作用域 + 命令扫描 + 环境变量清洗，永远可用 |
 | `docker` | **是** | `docker run --rm --network none -v <root>:/work`，需要 docker 守护进程在跑 |
 | `wsl` | 部分 | 命令跑在 WSL 里，但 `/mnt/c` 仍映射到 Windows 磁盘 |
 
-后端可用性由**实际探测**决定（`docker info`、`wsl -e sh -c exit 0`），没装就标「未安装」并禁用，不会假装隔离成功。
+后端可用性由**实际探测**决定。`windows` 检查项目内执行器和系统 PowerShell；Docker/WSL 分别执行
+`docker info`、`wsl -e sh -c exit 0`。不可用时直接失败关闭，不会悄悄改用 `local`。
 
 ### 本地策略沙箱具体拦什么
 
@@ -599,9 +703,14 @@ Invoke-WebRequest 'http://127.0.0.1:5175/api/sessions/export' -OutFile "backup-$
 
 ### 明确的边界
 
-这是**策略沙箱，不是内核沙箱**。Node 无法在不写原生扩展的情况下给子进程降权，所以本地后端挡不住：
-变量展开绕过（`$HOME`、`%TEMP%`）、编码混淆、程序内部自己拼路径（比如 `python -c` 里读任意文件）、
-已经拿到 shell 之后的间接逃逸。**要真隔离就选 docker 后端**，或者把 agent 放进容器/虚拟机里跑。
+`local` 是策略沙箱，挡不住变量展开、编码混淆或程序内部拼路径。Windows 默认后端不依赖这些正则
+来保护写入：即使命令先 base64 编码、再由子 PowerShell 解码，Windows 的第二次 ACL 访问检查仍会拒绝
+工作区外写入；派生的 Bun/PowerShell/Git 也继承同一受限令牌。内置文件工具则继续在控制器中接受
+`sandbox.resolve()` 路径检查——这与 Claude Code 将 shell 的 OS 沙箱和工具权限策略分层的做法一致。
+
+当前没有实现的强边界是：工作区外**读取保密**、无管理员权限下的强制断网、独立桌面/GUI 消息隔离。
+另外，为让 Windows 会话对象正常初始化，restricted SID 集合包含 Everyone/登录会话 SID；如果某个外部对象
+本来就显式允许 Everyone 写，它仍可能可写。因此界面显示“Windows 原生写入沙箱”，不会把它冒充成容器。
 
 界面上有个「自测规则」按钮，会拿当前配置跑 8 条固定用例（区域内读、区域外读、越界命令、穿越、
 危险命令、只读写操作…），把放行/拒绝结果直接列出来——改完配置点一下就知道挡不挡得住。
@@ -624,7 +733,7 @@ Invoke-WebRequest 'http://127.0.0.1:5175/api/sessions/export' -OutFile "backup-$
     function calling、token 用量，并拉取该端点的模型列表。key 只存在这台浏览器的
     `localStorage`，留空则回落到服务端环境变量。
   - **交互**：默认审批模式、每轮自动召回记忆条数。
-  - **沙箱**：作用区域（工作区/主目录/自定义/全盘）、权限（可写/只读）、执行后端（本地策略/Docker/WSL）、
+  - **沙箱**：作用区域（工作区/主目录/自定义/全盘）、权限（可写/只读）、执行后端（Windows 原生/本地策略/Docker/WSL）、
     严格模式开关、**自测规则**按钮，以及当前实际根目录预览。
   - **任务**：模型用 `todo_write` 维护的清单，实时同步。
   - **记忆**：搜索 / 新增 / 删除 / 分层统计。
@@ -663,31 +772,40 @@ Invoke-WebRequest 'http://127.0.0.1:5175/api/sessions/export' -OutFile "backup-$
 | GET | `/api/sessions/:id/events` `/artifacts` | trace 事件（带 group/summary）/ 产物列表 |
 | GET | `/api/sessions/:id/trace?format=jsonl\|json\|md` | **导出 trace**（附件下载） |
 | GET | `/api/sessions/:id/export?format=json\|md` | **导出会话**（含消息与状态） |
-| GET/POST/PATCH/DELETE | `/api/memory` `/api/memory/:id` `/api/memory/search` `/api/memory/stats` | 记忆 CRUD 与检索 |
+| GET/POST/PATCH/DELETE | `/api/memory` `/api/memory/:id` `/api/memory/search` `/api/memory/stats` | 记忆 CRUD 与检索（可带 `chunk`） |
+| GET/PUT | `/api/memory/chunks[/:name]` | 三块常驻画像的原文读写（`user.md` / `soul.md` / `preference.md`） |
+| GET/POST/DELETE | `/api/skills` `/api/skills/:name` | 技能列表 / 自己生成 / 详情（`?file=` 读正文）/ 删除 |
+| POST | `/api/skills/install` | 安装 zip（`zipBase64` / `zipPath` / `url`，也支持 `name`+`content` 直接生成） |
+| GET | `/api/skills/:name/export` | 导出技能为 zip（附件下载） |
 | POST | `/api/approve` | 审批结果回填 |
 | POST | `/api/chat` | SSE 对话流（可带 `provider`/`model`/`apiKey`/`baseUrl`） |
 | POST | `/api/workflows/run` | SSE 工作流流 |
 
-SSE 事件类型（30+）：`session` `model` `state` `step` `assistant_delta` `reasoning_delta`
+SSE 事件类型（35+）：`session` `model` `state` `step` `assistant_delta` `reasoning_delta`
 `assistant_message` `tool_call` `tool_result` `approval_request` `approval_result` `todos`
-`memory_recall` `memory` `subagent_start` `subagent_done` `workflow_*` `usage` `retry` `error` `done`。
+`memory_recall` `memory_profile` `memory` `skills` `skill` `subagent_start` `subagent_done`
+`subagent_event` `workflow_*` `usage` `retry` `error` `done`。
 
-## 测试：八层，全部真跑
+## 测试：九层，全部真跑
 
 ```powershell
 node scripts/port-test.js      # 模型端口：假厂商跑通两条协议 + 重试 + 错误归一化（37 项）
-node scripts/harness-test.js   # 内核：状态/记忆/工具/策略/上下文/子代理/工作流/循环（72 项）
-node scripts/api-test.js       # HTTP：29 个端点（需先起服务）
+node scripts/harness-test.js   # 内核：状态/记忆/工具/策略/上下文/子代理/工作流/循环（74 项）
+node scripts/memory-chunks-test.js # 记忆分块：迁移/user.md·soul.md·preference.md/手改回读/注入预算/工具（47 项）
+node scripts/skills-test.js    # 技能：zip 读写/zip-slip·符号链接·体积校验/自己生成/导出重装/工具（53 项）
+node scripts/api-test.js       # HTTP：29 个端点（需先起服务；62 项）
 node scripts/e2e.js            # 对话链路：工具调用 + 审批 + 结果回灌（需先起服务）
 node scripts/ui-check.js       # 前端：设置 / 审批 / 面板 / 布局体检 / 深色主题
 node scripts/ui-key-test.js    # 界面填 API key 专项：填 key → 测试连接 → 保存 → 真发一轮（需 fake-llm）
 node scripts/trace-test.js     # Trace：事件记录 → 标签页/弹窗查看 → 三种格式导出（29 项）
-node scripts/sandbox-test.js   # 沙箱：作用区域/权限/命令扫描/环境清洗/后端/审计/界面（76 项）
+node scripts/sandbox-test.js   # 沙箱：作用区域/权限/命令扫描/环境清洗/后端/审计/界面（86 项）
+node scripts/windows-sandbox-test.js # Windows 原生边界：run_shell/越权写/子进程/只读/缓存不可篡改/Job Object（20 项）
+node scripts/jail-test.js      # Node 权限模型验收：--jail 下的隔离等级与越权拦截（13 项）
 node scripts/markdown-test.js  # Markdown：65 条语法与安全断言 + 全特性渲染截图
 node scripts/agents-test.js    # 子代理：凭证继承 + 嵌套 trace + 执行视图（45 项）
 node scripts/workspace-test.js # 多工作区：CRUD / 会话归属 / 跨工作区拦截 / 记忆隔离 / 侧栏分组（43 项）
 node scripts/feishu-test.js    # 飞书通道：@ 识别 / 去重 / 会话映射 / 跨群聚合 / 回复分片 / 私聊隔离（73 项）
-node scripts/run-check.js      # 启动脚本：编码/换行/运行顺序/资产表/SHA256 校验（35 项，不需要运行时）
+node scripts/run-check.js      # 启动脚本：编码/换行/运行顺序/资产表/SHA256 校验（45 项，不需要运行时）
 node scripts/runtime-check.js  # 环境自检：工作区/数据目录/端口/沙箱边界/真跑一次工具（23 项）
 ```
 
@@ -713,7 +831,7 @@ node scripts/ui-key-test.js    # 在界面上填 key 连它，验证「填 key �
 
 ## 这个骨架**没有**做的事
 
-- **沙箱是策略级的**：本地后端挡不住变量展开绕过和程序内部拼路径，要真隔离请用 docker 后端或把整个 harness 放进容器（详见上面「沙箱」一节的边界说明）。
+- **Windows 原生沙箱不是完整容器**：它已用 OS 强制工作区写入边界和进程树限制，但工作区外读取沿用当前用户，代理网络规则也不是防恶意直连的防火墙；完整保密/断网仍用 Docker 或虚拟机。
 - **记忆没有向量检索**：词元重叠在小规模下够用，量大了要换 embedding + 向量库。
 - **工作流没有条件分支/循环**：只有「阶段串行 + 阶段内并行」，没有 if/else 和 while。
 - **没有多租户**：单进程单工作区，会话之间靠 sessionId 隔离。

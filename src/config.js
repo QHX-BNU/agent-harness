@@ -46,6 +46,13 @@ export const config = {
   memoryEnabled: env.MEMORY_ENABLED !== '0',
   memoryTopK: num(env.MEMORY_TOP_K, 5), // 每轮自动召回条数
   memoryDir: path.resolve(env.MEMORY_DIR || '.memory'),
+  // user.md / soul.md / preference.md 三块画像常驻注入，按字符预算截断
+  memoryProfileEnabled: env.MEMORY_PROFILE_ENABLED !== '0',
+  memoryProfileMaxChars: num(env.MEMORY_PROFILE_MAX_CHARS, 3000),
+
+  // ---- 技能（技能包 = 目录 + SKILL.md，安装走 zip）----
+  skillsEnabled: env.SKILLS_ENABLED !== '0',
+  skillsDir: path.resolve(env.SKILLS_DIR || '.skills'),
 
   // ---- 子代理 / 工作流 ----
   maxAgentDepth: num(env.MAX_AGENT_DEPTH, 2), // 允许的委派深度
@@ -54,7 +61,7 @@ export const config = {
 
   // ---- 沙箱：作用区域 / 权限 / 后端 ----
   // scope: workspace | home | custom | full      mode: write | readonly
-  // backend: local（策略沙箱） | docker | wsl（真隔离，需本机装好）
+  // backend: windows（免安装原生边界） | local（策略） | docker（命令容器隔离） | wsl（子系统）
   sandbox: sandboxDefaults(env),
 
   // ---- 持久化 ----
@@ -114,6 +121,9 @@ export function publicConfig() {
     modelRetries: config.modelRetries,
     memoryEnabled: config.memoryEnabled,
     memoryTopK: config.memoryTopK,
+    memoryProfileEnabled: config.memoryProfileEnabled,
+    memoryProfileMaxChars: config.memoryProfileMaxChars,
+    skillsEnabled: config.skillsEnabled,
     maxAgentDepth: config.maxAgentDepth,
     maxConcurrentAgents: config.maxConcurrentAgents,
     sandbox: config.sandbox,

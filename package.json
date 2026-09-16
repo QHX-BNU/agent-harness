@@ -20,12 +20,18 @@
     "ui-key-test": "node scripts/ui-key-test.js",
     "trace-test": "node scripts/trace-test.js",
     "sandbox-test": "node scripts/sandbox-test.js",
+    "windows-sandbox-test": "node scripts/windows-sandbox-test.js",
+    "memory-chunks-test": "node scripts/memory-chunks-test.js",
+    "skills-test": "node scripts/skills-test.js",
+    "jail-test": "node scripts/jail-test.js",
     "markdown-test": "node scripts/markdown-test.js",
     "agents-test": "node scripts/agents-test.js",
     "workspace-test": "node scripts/workspace-test.js",
     "feishu-test": "node scripts/feishu-test.js",
     "run-check": "node scripts/run-check.js",
     "runtime-check": "node scripts/runtime-check.js",
+    "docker-check": "node scripts/docker-check.js",
+    "docker-smoke": "node scripts/docker-smoke.js",
     "setup-runtime": "node scripts/setup-runtime.js"
   }
 }

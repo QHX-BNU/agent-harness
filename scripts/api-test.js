@@ -104,6 +104,64 @@ ok('PATCH /api/memory/:id', medit.data?.importance === 0.95);
 const mdel = await fetch(`${base}/api/memory/${m1.data.id}`, { method: 'DELETE' });
 ok('DELETE /api/memory/:id', (await mdel.json()).ok === true);
 
+// ---- 画像文件（user.md / soul.md / preference.md）----
+const chunks = await get('/api/memory/chunks');
+ok('GET /api/memory/chunks', chunks.status === 200 && chunks.data.chunks.length === 3, chunks.data.chunks.map((c) => c.file).join(', '));
+ok('画像返回原文与条目', chunks.data.chunks.every((c) => typeof c.text === 'string' && Array.isArray(c.items)));
+
+const chunkAdd = await send('/api/memory', {
+  content: '接口冒烟：用户偏好中文回答',
+  scope: 'global',
+  category: 'self',
+  chunk: 'preference',
+});
+ok('POST /api/memory 带 chunk', chunkAdd.status === 201 && chunkAdd.data.chunk === 'preference' && chunkAdd.data.scope === 'global');
+const pref = await get('/api/memory/chunks/preference');
+ok('GET /api/memory/chunks/:name', pref.status === 200 && pref.data.text.includes('接口冒烟') && pref.data.items.some((i) => i.id === chunkAdd.data.id));
+
+const manualText = `${pref.data.text.trimEnd()}\n- 接口冒烟：手改一行也能生效\n`;
+const putChunk = await send('/api/memory/chunks/preference', { text: manualText }, 'PUT');
+ok('PUT /api/memory/chunks/:name（整块手改）', putChunk.status === 200 && putChunk.data.items.some((i) => i.content.includes('手改一行')));
+const reloaded = await get('/api/memory/chunks/preference');
+ok('手改后重新读取仍在', reloaded.data.text.includes('手改一行'));
+
+// 清理：把两行测试记忆删掉
+for (const item of reloaded.data.items.filter((i) => i.content.includes('接口冒烟'))) {
+  await fetch(`${base}/api/memory/${item.id}`, { method: 'DELETE' });
+}
+ok('清理冒烟记忆', (await get('/api/memory/chunks/preference')).data.items.every((i) => !i.content.includes('接口冒烟')));
+
+// ---- 技能 ----
+const skills = await get('/api/skills');
+ok('GET /api/skills', skills.status === 200 && Array.isArray(skills.data.items), `${skills.data.items.length} 个 · enabled=${skills.data.enabled}`);
+
+const made = await send('/api/skills', {
+  name: 'api-smoke-skill',
+  description: '接口冒烟用的技能',
+  when: '测试时',
+  content: '# 步骤\n1. 什么都不做\n',
+  force: true,
+});
+ok('POST /api/skills（自己生成）', made.status === 201 && made.data.name === 'api-smoke-skill', made.data?.name);
+ok('生成后带文件清单', Array.isArray(made.data.files) && made.data.files.some((f) => f.path === 'SKILL.md'));
+
+const oneSkill = await get('/api/skills/api-smoke-skill?file=SKILL.md');
+ok('GET /api/skills/:name?file=', oneSkill.status === 200 && oneSkill.data.content.includes('什么都不做'));
+
+const exported = await fetch(`${base}/api/skills/api-smoke-skill/export`);
+const zipBuf = Buffer.from(await exported.arrayBuffer());
+ok('GET /api/skills/:name/export 返回 zip', exported.status === 200 && zipBuf.subarray(0, 2).toString('latin1') === 'PK', `${zipBuf.length} 字节`);
+
+const installed = await send('/api/skills/install', { zipBase64: zipBuf.toString('base64'), source: 'api-test.zip', name: 'api-smoke-skill-2', force: true });
+ok('POST /api/skills/install（base64）', installed.status === 201 && installed.data.name === 'api-smoke-skill-2');
+
+const badInstall = await send('/api/skills/install', { zipBase64: Buffer.from('nope').toString('base64') });
+ok('安装坏包被拒（4xx/5xx 且带原因）', badInstall.status >= 400 && Boolean(badInstall.data?.error), badInstall.data?.error);
+
+const removed1 = await fetch(`${base}/api/skills/api-smoke-skill`, { method: 'DELETE' });
+const removed2 = await fetch(`${base}/api/skills/api-smoke-skill-2`, { method: 'DELETE' });
+ok('DELETE /api/skills/:name（清理冒烟技能）', (await removed1.json()).ok === true && (await removed2.json()).ok === true);
+
 const wfs = await get('/api/workflows');
 ok('GET /api/workflows', wfs.status === 200 && wfs.data.length >= 2, wfs.data.map((w) => w.name).join(', '));
 ok('工作流带阶段说明', wfs.data.every((w) => w.phases.length > 0));

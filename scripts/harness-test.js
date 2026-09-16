@@ -281,8 +281,8 @@ section('[8] 控制循环集成');
   ok('事件日志可回放', store.readEvents(session.id).length > 0, `${store.readEvents(session.id).length} 条`);
   ok('会话被持久化', Boolean(store.get(session.id)));
 
-  // 记忆自动召回
-  const session2 = store.create({ provider: 'custom', model: 'fake-1', approvalMode: 'auto' });
+  // 记忆自动召回（会话要落在同一个工作区里，否则 workspace 级记忆不可见）
+  const session2 = store.create({ provider: 'custom', model: 'fake-1', approvalMode: 'auto', workspaceId: tmp });
   const events2 = [];
   await runTurn({
     session: session2,

@@ -14,6 +14,26 @@
 
   const state = { sessionId: null, sessions: [], workspaces: [], activeWorkspace: 'default', collapsed: new Set() };
 
+  const getActiveWorkspace = () =>
+    state.workspaces.find((w) => w.id === state.activeWorkspace) || state.workspaces.find((w) => w.id === 'default') || null;
+
+  /** 左下角路径、请求归属和“仅工作区”沙箱预览必须来自同一个 active workspace。 */
+  function syncActiveWorkspace() {
+    const workspace = getActiveWorkspace();
+    const path = document.getElementById('workspace');
+    if (path && workspace) {
+      path.textContent = workspace.path;
+      path.title = `${workspace.name} · ${workspace.path}`;
+    }
+    window.Chat?.setWorkspace?.(workspace);
+  }
+
+  function setActiveWorkspace(id) {
+    if (!id) return;
+    state.activeWorkspace = id;
+    syncActiveWorkspace();
+  }
+
   const relTime = (ts) => {
     const d = Date.now() - (ts || 0);
     if (d < 60000) return '刚刚';
@@ -44,7 +64,7 @@
         });
         return;
       }
-      state.activeWorkspace = s.workspaceId || 'default';
+      setActiveWorkspace(s.workspaceId || 'default');
       await window.Chat?.loadSession(s.id);
       refreshSessions();
     };
@@ -62,6 +82,8 @@
     // 当前会话所属工作区高亮；没有会话时保持原样
     const current = state.sessions.find((s) => s.id === state.sessionId);
     if (current) state.activeWorkspace = current.workspaceId || 'default';
+    if (!state.workspaces.some((w) => w.id === state.activeWorkspace)) state.activeWorkspace = 'default';
+    syncActiveWorkspace();
 
     const box = $('sessionList');
     box.innerHTML = '';
@@ -93,7 +115,7 @@
           if (btn.classList.contains('rm')) return removeWorkspace(w);
           return;
         }
-        state.activeWorkspace = w.id;
+        setActiveWorkspace(w.id);
         state.collapsed.has(w.id) ? state.collapsed.delete(w.id) : state.collapsed.add(w.id);
         refreshSessions();
       };
@@ -119,7 +141,7 @@
   async function newSessionIn(workspaceId) {
     const wid = workspaceId || state.activeWorkspace || 'default';
     const created = await post('/api/sessions', { workspaceId: wid });
-    state.activeWorkspace = wid;
+    setActiveWorkspace(wid);
     await window.Chat?.loadSession(created.id);
     refreshSessions();
     showToast(`已在「${state.workspaces.find((w) => w.id === wid)?.name || wid}」新建会话`);
@@ -145,7 +167,7 @@
     try {
       const w = await post('/api/workspaces', { name, path });
       closeWsModal();
-      state.activeWorkspace = w.id;
+      setActiveWorkspace(w.id);
       await refreshSessions();
       showToast(`已添加工作区「${w.name}」`);
     } catch (err) {
@@ -172,7 +194,7 @@
     if (!confirm(`删除工作区「${w.name}」？\n（只是从列表移除，不会删磁盘上的目录）`)) return;
     try {
       await api(`/api/workspaces/${encodeURIComponent(w.id)}`, { method: 'DELETE' });
-      if (state.activeWorkspace === w.id) state.activeWorkspace = 'default';
+      if (state.activeWorkspace === w.id) setActiveWorkspace('default');
       refreshSessions();
     } catch (err) {
       showToast(`删除失败：${err.message}`);
@@ -263,6 +285,73 @@
   }
 
   // ---------- 记忆 ----------
+
+  /** 三块画像文件：默认只显示标题 + 条数，点「编辑」才展开 markdown 原文 */
+  async function refreshChunks() {
+    const box = $('memChunks');
+    if (!box) return;
+    try {
+      const { chunks } = await api('/api/memory/chunks');
+      box.innerHTML = '';
+      for (const c of chunks) {
+        const card = document.createElement('div');
+        card.className = 'mem-chunk';
+        const head = document.createElement('div');
+        head.className = 'mem-chunk-head';
+        head.innerHTML = `<b>${c.file}</b><span class="dim">${c.count} 条</span>`;
+        const edit = document.createElement('button');
+        edit.className = 'mini';
+        edit.textContent = '编辑';
+        head.append(edit);
+        const hint = document.createElement('div');
+        hint.className = 'dim';
+        hint.textContent = c.hint || '';
+        const area = document.createElement('textarea');
+        area.rows = 6;
+        area.hidden = true;
+        area.value = c.text;
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.hidden = true;
+        const save = document.createElement('button');
+        save.className = 'mini primary';
+        save.textContent = '保存';
+        const cancel = document.createElement('button');
+        cancel.className = 'mini';
+        cancel.textContent = '取消';
+        row.append(save, cancel);
+        edit.onclick = () => {
+          area.hidden = !area.hidden;
+          row.hidden = area.hidden;
+          if (!area.hidden) area.focus();
+        };
+        cancel.onclick = () => {
+          area.value = c.text;
+          area.hidden = true;
+          row.hidden = true;
+        };
+        save.onclick = async () => {
+          try {
+            await api(`/api/memory/chunks/${encodeURIComponent(c.name)}`, {
+              method: 'PUT',
+              body: JSON.stringify({ text: area.value }),
+            });
+            const count = area.value.split('\n').filter((l) => /^\s*[-*]\s+\S/.test(l)).length;
+            showToast(`${c.file} 已保存（${count} 条）`);
+            refreshChunks();
+            refreshMemory();
+          } catch (err) {
+            showToast(`保存失败：${err.message}`);
+          }
+        };
+        card.append(head, hint, area, row);
+        box.append(card);
+      }
+    } catch (err) {
+      box.innerHTML = `<div class="dim">画像读取失败：${err.message}</div>`;
+    }
+  }
+
   async function refreshMemory(keyword = '') {
     const box = $('memList');
     try {
@@ -276,18 +365,23 @@
       for (const m of items) {
         const el = document.createElement('div');
         el.className = 'mem-item';
-        el.innerHTML = `<div class="meta"><span>#${m.id} · ${m.scope}/${m.category} · ${m.importance}</span><span class="del">删除</span></div><div class="body"></div>`;
+        const where = m.chunk ? `${m.chunk}.md` : `${m.scope}/${m.category}`;
+        el.innerHTML = `<div class="meta"><span>#${m.id} · ${where} · ${m.importance}</span><span class="del">删除</span></div><div class="body"></div>`;
         el.querySelector('.body').textContent = m.content;
         el.querySelector('.del').onclick = async () => {
           await api(`/api/memory/${m.id}`, { method: 'DELETE' });
           refreshMemory();
+          refreshChunks();
         };
         box.append(el);
       }
       const foot = document.createElement('div');
       foot.className = 'dim';
       foot.style.marginTop = '8px';
-      foot.textContent = `共 ${stats.total} 条 · ${Object.entries(stats.byScope || {}).map(([k, v]) => `${k}:${v}`).join(' ')}`;
+      const chunkLine = Object.entries(stats.byChunk || {})
+        .map(([k, v]) => `${k === 'json' ? '结构化' : `${k}.md`}:${v}`)
+        .join(' ');
+      foot.textContent = `共 ${stats.total} 条 · ${chunkLine} · ${Object.entries(stats.byScope || {}).map(([k, v]) => `${k}:${v}`).join(' ')}`;
       box.append(foot);
     } catch (err) {
       box.innerHTML = `<div class="dim">读取失败：${err.message}</div>`;
@@ -297,15 +391,107 @@
   async function addMemory() {
     const content = $('memContent').value.trim();
     if (!content) return;
-    await post('/api/memory', {
-      content,
-      scope: $('memScope').value,
-      category: $('memCategory').value,
-      importance: Number($('memImportance').value) || 0.6,
-      sessionId: state.sessionId,
-    });
-    $('memContent').value = '';
-    refreshMemory();
+    try {
+      const chunk = $('memChunk')?.value || '';
+      await post('/api/memory', {
+        content,
+        scope: $('memScope').value,
+        category: $('memCategory').value,
+        importance: Number($('memImportance').value) || 0.6,
+        sessionId: state.sessionId,
+        ...(chunk ? { chunk: chunk === 'none' ? null : chunk } : {}),
+      });
+      $('memContent').value = '';
+      refreshMemory();
+      refreshChunks();
+      showToast('已记住');
+    } catch (err) {
+      showToast(`保存失败：${err.message}`);
+    }
+  }
+
+  // ---------- 技能 ----------
+  async function refreshSkills() {
+    const box = $('skillList');
+    if (!box) return;
+    try {
+      const { items, enabled, stats } = await api('/api/skills');
+      if (!enabled) {
+        box.innerHTML = '<div class="dim">技能功能已关闭（SKILLS_ENABLED=0）</div>';
+        return;
+      }
+      if ($('skillHint')) $('skillHint').textContent = `共 ${stats?.total || 0} 个 · ${Math.round((stats?.bytes || 0) / 1024)}KB`;
+      box.innerHTML = '';
+      if (!items.length) {
+        box.innerHTML = '<div class="dim">还没有技能：可以上传 zip 包，或直接写一个。</div>';
+        return;
+      }
+      for (const s of items) {
+        const el = document.createElement('div');
+        el.className = 'mem-item';
+        const files = (s.files || []).length;
+        el.innerHTML =
+          `<div class="meta"><span><b>${s.name}</b>${s.version ? `@${s.version}` : ''} · ${s.source || ''} · ${files} 个文件</span>` +
+          `<span class="acts"><span class="open">查看</span> <span class="exp">导出</span> <span class="del">删除</span></span></div>` +
+          `<div class="body"></div>`;
+        el.querySelector('.body').textContent = s.description + (s.when ? `（何时用：${s.when}）` : '');
+        el.querySelector('.open').onclick = async () => {
+          const detail = await api(`/api/skills/${encodeURIComponent(s.name)}?file=SKILL.md`);
+          const view = $('skillView');
+          view.hidden = false;
+          view.textContent = `# ${s.name}\n\n${detail.content || '(空)'}`;
+          view.scrollIntoView({ block: 'nearest' });
+        };
+        el.querySelector('.exp').onclick = () => {
+          window.location.href = `/api/skills/${encodeURIComponent(s.name)}/export`;
+        };
+        el.querySelector('.del').onclick = async () => {
+          if (!confirm(`删除技能「${s.name}」？`)) return;
+          await api(`/api/skills/${encodeURIComponent(s.name)}`, { method: 'DELETE' });
+          refreshSkills();
+          showToast(`已删除 ${s.name}`);
+        };
+        box.append(el);
+      }
+    } catch (err) {
+      box.innerHTML = `<div class="dim">读取失败：${err.message}</div>`;
+    }
+  }
+
+  async function installSkillZip() {
+    const input = $('skillZip');
+    const file = input?.files?.[0];
+    if (!file) return showToast('先选一个 .zip 文件');
+    if (file.size > 8 * 1024 * 1024) return showToast('压缩包太大（>8MB）');
+    try {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      let binary = '';
+      for (let i = 0; i < buf.length; i += 0x8000) binary += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+      const meta = await post('/api/skills/install', { zipBase64: btoa(binary), source: file.name, force: true });
+      input.value = '';
+      refreshSkills();
+      showToast(`已安装 ${meta.name}（${meta.files?.length || 0} 个文件）`);
+    } catch (err) {
+      showToast(`安装失败：${err.message}`);
+    }
+  }
+
+  async function createSkill() {
+    const name = $('skillName').value.trim();
+    const description = $('skillDesc').value.trim();
+    const content = $('skillBody').value;
+    if (!name || !description || !content.trim()) return showToast('技能名 / 描述 / 正文都要填');
+    try {
+      const meta = await post('/api/skills', { name, description, content, when: $('skillWhen').value.trim(), force: true });
+      $('skillName').value = '';
+      $('skillDesc').value = '';
+      $('skillWhen').value = '';
+      $('skillBody').value = '';
+      refreshSkills();
+      showToast(`已创建技能 ${meta.name}`);
+    } catch (err) {
+      showToast(`创建失败：${err.message}`);
+    }
   }
 
   // ---------- 工具 ----------
@@ -461,6 +647,12 @@
     });
     $('memAdd').onclick = addMemory;
     $('memSearchBtn').onclick = () => refreshMemory($('memSearch').value.trim());
+    $('skillInstall')?.addEventListener('click', installSkillZip);
+    $('skillCreate')?.addEventListener('click', createSkill);
+    $('skillZip')?.addEventListener('change', () => {
+      const f = $('skillZip').files?.[0];
+      if ($('skillHint') && f) $('skillHint').textContent = `待安装：${f.name}（${Math.round(f.size / 1024)}KB）`;
+    });
     $('memSearch').onkeydown = (e) => {
       if (e.key === 'Enter') refreshMemory($('memSearch').value.trim());
     };
@@ -490,6 +682,8 @@
     });
     refreshSessions();
     refreshMemory();
+    refreshChunks();
+    refreshSkills();
     refreshTools();
     refreshWorkflows();
     refreshTrash();
@@ -520,6 +714,8 @@
     state,
     refreshSessions,
     refreshMemory,
+    refreshChunks,
+    refreshSkills,
     refreshTools,
     refreshWorkflows,
     refreshTrash,

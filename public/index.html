@@ -139,6 +139,7 @@
             <button class="snav" data-sec="sandbox">沙箱</button>
             <button class="snav" data-sec="todos">任务</button>
             <button class="snav" data-sec="memory">记忆</button>
+            <button class="snav" data-sec="skills">技能</button>
             <button class="snav" data-sec="tools">工具</button>
             <button class="snav" data-sec="workflows">工作流</button>
             <button class="snav" data-sec="trash">回收站</button>
@@ -197,9 +198,10 @@
             <section class="spane" id="sec-sandbox">
               <div class="isolation-badge" id="sbIsolation"></div>
               <p class="hint">
-                决定 agent 能碰到哪些目录、能访问哪些网站。<b>本地策略沙箱</b>靠路径作用域 + 命令扫描 +
-                环境变量清洗收口，<b>不是内核隔离、可以被绕过</b>；要真隔离用
-                <code class="inline">run.cmd --jail</code>（Node 权限模型，运行时强制）或 Docker / WSL 后端。
+                决定 agent 能写哪些目录、能访问哪些网站。Windows 默认使用项目内原生写入沙箱
+                （Restricted Token + ACL + Job Object，无需 Docker）；工作区外读取仍沿用当前用户，网络规则为代理级。
+                <b>local</b> 仅靠路径与命令扫描，可以被绕过；也可选
+                <code class="inline">run.cmd --jail</code>（Node 权限模型、禁用 shell）或 Docker 后端。
               </p>
               <label class="field">
                 <span>作用区域</span>
@@ -252,6 +254,13 @@
 
             <!-- 记忆 -->
             <section class="spane" id="sec-memory">
+              <p class="hint">
+                三块<b>常驻画像</b>（<code class="inline">user.md</code> / <code class="inline">soul.md</code> /
+                <code class="inline">preference.md</code>）每轮都会注入，所以只放长期有用的东西；其余记忆按相关度召回。
+                画像可以直接改原文，一行一条。
+              </p>
+              <div id="memChunks" class="mem-chunks"></div>
+              <div class="divider-label">结构化记忆（按需召回）</div>
               <div class="row">
                 <input id="memSearch" placeholder="搜索记忆…" />
                 <button id="memSearchBtn" class="mini">搜索</button>
@@ -273,10 +282,43 @@
                     <option value="self">self</option>
                     <option value="anchor">anchor</option>
                   </select>
+                  <select id="memChunk" title="写进哪块常驻画像">
+                    <option value="">（按 scope/category 自动）</option>
+                    <option value="user">user.md</option>
+                    <option value="soul">soul.md</option>
+                    <option value="preference">preference.md</option>
+                    <option value="none">不进画像</option>
+                  </select>
                   <input id="memImportance" type="number" min="0" max="1" step="0.1" value="0.6" title="重要度" />
                 </div>
                 <button id="memAdd" class="mini primary">保存</button>
               </details>
+            </section>
+
+            <!-- 技能 -->
+            <section class="spane" id="sec-skills">
+              <p class="hint">
+                技能包 = 一个目录 + <code class="inline">SKILL.md</code>（可带 <code class="inline">scripts/</code> 附件）。
+                系统提示里只列名字和描述，要用时模型自己 <code class="inline">skill_read</code> 读全文 —— 装多少都不会把上下文撑爆。
+                技能落在项目的 <code class="inline">.skills/</code>（不在工作区里，沙箱改不到）。
+              </p>
+              <div class="row">
+                <input type="file" id="skillZip" accept=".zip" />
+                <button id="skillInstall" class="mini primary">安装 zip</button>
+                <span class="dim" id="skillHint"></span>
+              </div>
+              <details class="add">
+                <summary>＋ 自己写一个技能</summary>
+                <div class="row">
+                  <input id="skillName" placeholder="技能名，如 xhs-post" />
+                  <input id="skillWhen" placeholder="何时用（可选）" />
+                </div>
+                <input id="skillDesc" placeholder="一句话描述（模型靠它判断该不该用）" />
+                <textarea id="skillBody" rows="6" placeholder="# 步骤&#10;1. …&#10;2. …"></textarea>
+                <button id="skillCreate" class="mini primary">创建 / 覆盖</button>
+              </details>
+              <div id="skillList" class="skill-list"></div>
+              <pre id="skillView" class="skill-view" hidden></pre>
             </section>
 
             <!-- 工具 -->

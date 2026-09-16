@@ -2,7 +2,7 @@
 // 这是 harness 最容易被低估的部分——预算管理、记忆注入、系统提示共同决定上限。
 import { config } from './config.js';
 
-export function buildSystemPrompt({ workspace, workspaceName = '', tools, approvalMode, model, memoryText = '', todos = [], skills = [], channelPrompt = '' }) {
+export function buildSystemPrompt({ workspace, workspaceName = '', tools, approvalMode, model, memoryText = '', profileText = '', todos = [], skills = [], channelPrompt = '' }) {
   // 工具清单只列名字：完整 schema 已经在 API 的 tools 参数里给过一次了，
   // 这里再抄一遍描述纯属浪费 token（每轮都要付一次）。
   const byCat = tools.reduce((acc, t) => {
@@ -31,6 +31,13 @@ ${toolList}`,
     sections.push(`## 当前场景\n${channelPrompt}`);
   }
 
+  // 画像文件（user.md / soul.md / preference.md）常驻：每轮都在，不用检索
+  if (profileText) {
+    sections.push(`## 长期画像（常驻，来自 user.md / soul.md / preference.md）
+${profileText}
+（回答时遵守这些事实与偏好；要增删改就维护对应条目：memory_add / memory_update / memory_profile）`);
+  }
+
   if (memoryText) {
     sections.push(`## 相关长期记忆（自动召回，按需使用，不要照抄）
 ${memoryText}`);
@@ -46,7 +53,13 @@ ${todos.map((t) => `${icon[t.status] || '[ ]'} ${t.content}`).join('\n')}
   }
 
   if (skills?.length) {
-    sections.push(`## 可用技能\n${skills.map((s) => `- ${s.name}: ${s.description}`).join('\n')}`);
+    sections.push(
+      `## 可用技能（按需展开）
+${skills
+  .map((s) => `- ${s.name}: ${s.description}${s.when ? `（何时用：${s.when}）` : ''}${s.files ? ` [${s.files} 个文件]` : ''}`)
+  .join('\n')}
+需要某个技能时，先用 skill_read(name) 读它的完整流程再照着做；没装过但流程值得复用，可以 skill_create 沉淀成技能。`,
+    );
   }
 
   sections.push(`## 规则

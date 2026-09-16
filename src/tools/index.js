@@ -4,6 +4,7 @@
 import { fsTools } from './fs.js';
 import { shellTools } from './shell.js';
 import { memoryTools } from './memory.js';
+import { skillTools } from './skills.js';
 import { planTools } from './plan.js';
 import { agentTools } from './agent.js';
 import { workflowTools } from './workflow.js';
@@ -14,6 +15,7 @@ export const BUILTIN = [
   ...fsTools,
   ...shellTools,
   ...memoryTools,
+  ...skillTools,
   ...planTools,
   ...digestTools,
   ...agentTools,
@@ -94,8 +96,13 @@ export function createToolRegistry({ tools = BUILTIN, disabled = [] } = {}) {
       if (!tool) return { ok: false, content: `未知工具：${name}` };
       if (disabledSet.has(name)) return { ok: false, content: `工具 ${name} 已被禁用` };
       try {
-        const content = await tool.run(args ?? {}, ctx);
-        return { ok: true, content: String(content) };
+        const result = await tool.run(args ?? {}, ctx);
+        // 大多数工具只返回文本；执行类工具可以返回结构化结果，正确区分
+        // “命令有输出”与“命令成功”。否则沙箱拒绝、非零退出也会被 trace 标成 ok:true。
+        if (result && typeof result === 'object' && typeof result.ok === 'boolean' && 'content' in result) {
+          return { ...result, content: String(result.content ?? '') };
+        }
+        return { ok: true, content: String(result) };
       } catch (err) {
         return { ok: false, content: `工具执行失败：${err.message}` };
       }
