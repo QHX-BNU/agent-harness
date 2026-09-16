@@ -184,16 +184,24 @@ section('[3] 文件工具以「会话所属工作区」为根');
 // ================= 4. 记忆按工作区隔离 =================
 section('[4] workspace 级记忆按工作区分区');
 {
-  await post('/api/memory', { content: '这条记忆属于 A 工作区', scope: 'workspace', workspaceId: wsA.id, importance: 0.9 });
-  await post('/api/memory', { content: '这条记忆属于 B 工作区', scope: 'workspace', workspaceId: wsB.id, importance: 0.9 });
+  // 这两条是测试数据，跑完必须删掉：不然会一直堆在真实记忆库里（列表/召回都被污染）
+  const memA = (await post('/api/memory', { content: '这条记忆属于 A 工作区', scope: 'workspace', workspaceId: wsA.id, importance: 0.9 })).data;
+  const memB = (await post('/api/memory', { content: '这条记忆属于 B 工作区', scope: 'workspace', workspaceId: wsB.id, importance: 0.9 })).data;
+  try {
+    const listA = (await j(`/api/memory?workspaceId=${wsA.id}&includeSession=0`)).data.items;
+    const listB = (await j(`/api/memory?workspaceId=${wsB.id}&includeSession=0`)).data.items;
+    ok('A 只看到 A 的 workspace 记忆', listA.some((m) => /属于 A/.test(m.content)) && !listA.some((m) => /属于 B/.test(m.content)), `${listA.length} 条`);
+    ok('B 只看到 B 的 workspace 记忆', listB.some((m) => /属于 B/.test(m.content)) && !listB.some((m) => /属于 A/.test(m.content)), `${listB.length} 条`);
 
-  const listA = (await j(`/api/memory?workspaceId=${wsA.id}&includeSession=0`)).data.items;
-  const listB = (await j(`/api/memory?workspaceId=${wsB.id}&includeSession=0`)).data.items;
-  ok('A 只看到 A 的 workspace 记忆', listA.some((m) => /属于 A/.test(m.content)) && !listA.some((m) => /属于 B/.test(m.content)), `${listA.length} 条`);
-  ok('B 只看到 B 的 workspace 记忆', listB.some((m) => /属于 B/.test(m.content)) && !listB.some((m) => /属于 A/.test(m.content)), `${listB.length} 条`);
-
-  const searchA = (await post('/api/memory/search', { query: '记忆属于哪个工作区', topK: 5, workspaceId: wsA.id, includeSession: false })).data;
-  ok('检索也按工作区过滤', searchA.length > 0 && searchA.every((h) => !/属于 B/.test(h.item.content)), searchA.map((h) => h.item.content).join(' | ').slice(0, 60));
+    const searchA = (await post('/api/memory/search', { query: '记忆属于哪个工作区', topK: 5, workspaceId: wsA.id, includeSession: false })).data;
+    ok('检索也按工作区过滤', searchA.length > 0 && searchA.every((h) => !/属于 B/.test(h.item.content)), searchA.map((h) => h.item.content).join(' | ').slice(0, 60));
+  } finally {
+    for (const m of [memA, memB]) {
+      if (m?.id) await fetch(`${BASE}/api/memory/${m.id}`, { method: 'DELETE' }).catch(() => {});
+    }
+    const left = (await j(`/api/memory?workspaceId=${wsA.id}&includeSession=0`)).data.items.filter((m) => /属于 A|属于 B/.test(m.content));
+    ok('测试记忆已清理（不留在真实记忆库）', left.length === 0, left.map((m) => `#${m.id}`).join(','));
+  }
 }
 
 // ================= 5. 界面：分组侧栏 =================
