@@ -61,7 +61,9 @@ export const config = {
 
   // ---- 沙箱：作用区域 / 权限 / 后端 ----
   // scope: workspace | home | custom | full      mode: write | readonly
-  // backend: windows（免安装原生边界） | local（策略） | docker（命令容器隔离） | wsl（子系统）
+  // backend: bwrap（Linux bubblewrap，默认） | seatbelt（macOS sandbox-exec，默认）
+  //          | windows（Windows 原生受限令牌，默认） | local（纯策略，可被绕过）
+  //          | docker（容器） | wsl（子系统）
   sandbox: sandboxDefaults(env),
 
   // ---- 持久化 ----

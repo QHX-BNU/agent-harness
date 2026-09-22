@@ -20,6 +20,8 @@
     "ui-key-test": "node scripts/ui-key-test.js",
     "trace-test": "node scripts/trace-test.js",
     "sandbox-test": "node scripts/sandbox-test.js",
+    "linux-sandbox-test": "node scripts/linux-sandbox-test.js",
+    "macos-sandbox-test": "node scripts/macos-sandbox-test.js",
     "windows-sandbox-test": "node scripts/windows-sandbox-test.js",
     "memory-chunks-test": "node scripts/memory-chunks-test.js",
     "skills-test": "node scripts/skills-test.js",

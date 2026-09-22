@@ -1,8 +1,9 @@
 // 隔离等级：说清楚「现在到底有没有真沙箱」，别让界面和文档含糊过去。
 //
-// 四种边界：
+// 五种边界：
+//   namespace  Linux bubblewrap：内核 namespace + bind mount（只读整机、可写白名单）—— 轻量真沙箱
+//   os         macOS Seatbelt / Windows Restricted Token + capability SID ACL + Job Object
 //   container  Docker 后端，或 harness 本身运行在容器里：操作系统级边界
-//   os         Windows Restricted Token + capability SID ACL + Job Object
 //   runtime    运行时强制：Node 权限模型（--permission）生效，fs/子进程由 V8 运行时拒绝
 //   policy     仅策略：路径作用域 + 命令扫描 + 环境变量清洗 —— 可被绕过，不是安全边界
 //
@@ -109,6 +110,8 @@ export function isolationSummary({
   containerRuntime = null,
   backendReady = null,
   controllerExposed = false,
+  networkMode = null,
+  networkEnforced = false,
 } = {}) {
   const jail = runtimeJail || detectRuntimeJail();
   const container = containerRuntime || detectContainerRuntime();
@@ -117,15 +120,39 @@ export function isolationSummary({
   let label = '仅策略（不是真沙箱）';
   let detail = '路径作用域 + 命令扫描 + 环境变量清洗。可以被脚本内容、编码命令、管道等方式绕过。';
 
-  if (backend === 'windows' && backendReady !== false) {
+  // 网络那一层到底靠什么挡：内核断网 / 强制代理桥 / 合作式代理 / 没挡
+  const networkNote =
+    networkMode === 'off'
+      ? networkEnforced
+        ? '网络由内核断开（独立 network namespace），没有出网接口。'
+        : '网络被完全关闭（策略层），但该后端没有内核级断网。'
+      : networkMode === 'all'
+        ? '网络不做限制。'
+        : networkEnforced
+          ? '非 all 的网络规则由强制代理桥执行：沙箱里没有直连通道，只能走策略代理。'
+          : '非 all 的网络规则是合作式代理约束（环境变量），刻意绕过代理的直连挡不住。';
+
+  if (backend === 'bwrap' && backendReady !== false) {
+    level = 'namespace';
+    label = 'Linux 轻量沙箱（bubblewrap）';
+    detail =
+      '内核 namespace + bind mount（Claude Code / Codex 同款）：整机只读、只有授权根目录可写、' +
+      '独立 PID/IPC/UTS namespace 与私有 /dev，父进程退出时整棵树一起收走。' + networkNote;
+  } else if (backend === 'seatbelt' && backendReady !== false) {
+    level = 'os';
+    label = 'macOS 沙箱（Seatbelt / sandbox-exec）';
+    detail =
+      '由 macOS 内核强制执行（Claude Code 同款）：默认拒绝一切，读全域、写只限授权根目录，' +
+      '进程与网络按策略放行。' + networkNote;
+  } else if (backend === 'windows' && backendReady !== false) {
     level = 'os';
     label = 'Windows 原生写入沙箱';
     detail =
-      '模型命令使用受限令牌运行，Windows ACL 把写入限制在已授权根目录，Job Object 限制并收拢整棵进程树；读取仍继承当前用户权限，非 all 网络规则依赖代理，不能阻止刻意绕过代理的直连。';
+      '模型命令使用受限令牌运行，Windows ACL 把写入限制在已授权根目录，Job Object 限制并收拢整棵进程树；读取仍继承当前用户权限。' + networkNote;
   } else if (backend === 'docker' && backendReady !== false) {
     level = 'container';
     label = '命令容器隔离（Docker）';
-    detail = 'run_shell 命令在独立 Docker 容器里执行；文件工具仍由 harness 进程按路径策略执行。';
+    detail = 'run_shell 命令在独立 Docker 容器里执行；文件工具仍由 harness 进程按路径策略执行。' + networkNote;
   } else if (container.active) {
     level = 'container';
     label = `Harness 容器边界（${container.engine || 'container'}）`;
@@ -139,6 +166,12 @@ export function isolationSummary({
     detail = jail.canSpawn
       ? '文件读写由 Node 运行时强制执行，超出白名单直接 ERR_ACCESS_DENIED；但允许了子进程，shell 里的操作仍可绕过。'
       : '文件读写由 Node 运行时强制执行，且禁止派生进程 —— agent 的文件操作与命令都被真正关住。';
+  } else if (backend === 'bwrap' && backendReady === false) {
+    label = 'bubblewrap 后端不可用';
+    detail = '没装 bubblewrap 或内核禁用了非特权 user namespace；命令会失败关闭，不会静默回落到本地执行。安装：sudo apt install bubblewrap。';
+  } else if (backend === 'seatbelt' && backendReady === false) {
+    label = 'sandbox-exec 后端不可用';
+    detail = '当前系统里找不到可用的 sandbox-exec；命令会失败关闭，不会静默回落到本地执行。';
   } else if (backend === 'windows' && backendReady === false) {
     label = 'Windows 原生沙箱不可用';
     detail = '项目内原生执行器或 Windows PowerShell 不可用；命令会失败关闭，不会静默回落。';
@@ -164,5 +197,7 @@ export function isolationSummary({
     backend,
     backendReady,
     controllerExposed: Boolean(controllerExposed),
+    networkMode,
+    networkEnforced: Boolean(networkEnforced),
   };
 }

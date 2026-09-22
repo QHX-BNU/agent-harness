@@ -8,9 +8,14 @@
 // 说清楚边界：代理是「合作式」的。程序如果自己实现网络栈、绕过代理变量直连，仍能出去；
 // 要绝对禁止只能靠内核/容器级隔离（docker --network none 或虚拟机）。
 // 所以这里是「大幅收窄 + 可审计」，不是「不可绕过」。
+//
+// 例外是 bwrap 后端：它把进程放进独立的 network namespace（--unshare-net），再通过一个
+// unix socket 把「唯一一条出网通道」暴露给沙箱内部的 socat 桥 —— 这时代理就从「合作式」
+// 变成了「强制式」：沙箱里没有任何网络接口可以直连。
 import http from 'node:http';
 import net from 'node:net';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 
 export const NETWORK_MODES = {
   all: { label: '全部放行', description: '不做网络限制（默认）' },
@@ -175,10 +180,16 @@ const proxyCache = new Map();
 
 /**
  * 取一个执行该策略的本地代理（同策略复用同一个）。
- * 返回 { url, port, token, close(), stats() }
+ *
+ * @param {object} policy
+ * @param {{onDecision?:Function, unixSocketPath?:string|null}} options
+ *   unixSocketPath：bwrap 的桥用。给定时额外监听一个 unix socket，让独立 network
+ *   namespace 里的沙箱把「唯一出网通道」固定在这个 socket 上。
+ * @returns {{url:string, port:number, unixPath:string|null, token:string, close():void, stats:object, ready:Promise}}
  */
-export function getNetworkProxy(policy, { onDecision = null } = {}) {
-  const key = `${policy.mode}|${policy.rules.map((r) => r.raw).join(',')}`;
+export function getNetworkProxy(policy, { onDecision = null, unixSocketPath = null } = {}) {
+  const bindUnix = String(unixSocketPath || '').trim() || null;
+  const key = `${policy.mode}|${policy.rules.map((r) => r.raw).join(',')}|${bindUnix || ''}`;
   if (proxyCache.has(key)) return proxyCache.get(key);
 
   const token = crypto.randomBytes(12).toString('hex');
@@ -208,7 +219,7 @@ export function getNetworkProxy(policy, { onDecision = null } = {}) {
     res.end(`mini-harness 网络策略拒绝：${reason}\n`);
   };
 
-  const server = http.createServer((req, res) => {
+  const handler = (req, res) => {
     if (!authorized(req)) return reject(res, 407, '代理令牌不对（防止本机其它程序蹭这个代理）');
     let target;
     try {
@@ -237,9 +248,9 @@ export function getNetworkProxy(policy, { onDecision = null } = {}) {
     );
     upstream.on('error', (err) => reject(res, 502, `连不上 ${target.hostname}：${err.message}`));
     req.pipe(upstream);
-  });
+  };
 
-  server.on('connect', (req, socket, head) => {
+  const onConnect = (req, socket, head) => {
     const [host, portRaw] = String(req.url).split(':');
     const port = Number(portRaw) || 443;
     const fail = (code, reason) => {
@@ -260,32 +271,83 @@ export function getNetworkProxy(policy, { onDecision = null } = {}) {
       decided(host, port, false, `连不上：${err.message}`);
       socket.end();
     });
-  });
+  };
+
+  // TCP 监听（本地/windows/wsl 后端用）+ 可选的 unix socket 监听（bwrap 代理桥用）。
+  // Node 的 Server 不能在同一实例上 listen 两种地址，所以是两个 server 共用同一套 handler。
+  const tcpServer = http.createServer(handler);
+  tcpServer.on('connect', onConnect);
+  const unixServer = bindUnix ? http.createServer(handler) : null;
+  if (unixServer) unixServer.on('connect', onConnect);
+
+  let tcpPort = 0;
+  let unixPath = null;
 
   const entry = {
     token,
     stats,
     get port() {
-      return server.address()?.port || 0;
+      return tcpPort;
+    },
+    get unixPath() {
+      return unixPath;
     },
     get url() {
-      return `http://x:${token}@127.0.0.1:${entry.port}`;
+      return `http://x:${token}@127.0.0.1:${tcpPort}`;
     },
-    ready: new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(entry.port))),
+    // 监听是异步的：先 TCP，再（可选）unix socket。任一失败都不让创建流程挂死，
+    // 由调用方检查 port / unixPath 后决定「失败关闭」还是继续。
+    ready: new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (!settled) {
+          settled = true;
+          resolve(entry);
+        }
+      };
+      tcpServer.on('error', () => finish());
+      tcpServer.listen(0, '127.0.0.1', () => {
+        tcpPort = tcpServer.address()?.port || 0;
+        if (!unixServer || bindUnix.length > 100) return finish();
+        // unix 绑定失败 → unixPath 保持 null，调用方检查后失败关闭
+        unixServer.on('error', () => finish());
+        try {
+          fs.rmSync(bindUnix, { force: true });
+        } catch {
+          /* 上次异常退出留下的 socket 文件；删不掉就让 listen 自己报错 */
+        }
+        unixServer.listen(bindUnix, () => {
+          unixPath = bindUnix;
+          finish();
+        });
+      });
+    }),
     close: () => {
       proxyCache.delete(key);
-      server.close();
+      tcpServer.close();
+      unixServer?.close();
+      if (unixPath) {
+        try {
+          fs.rmSync(unixPath, { force: true });
+        } catch {
+          /* 清理失败不影响关闭 */
+        }
+      }
     },
   };
-  server.unref?.();
+  tcpServer.unref?.();
+  unixServer?.unref?.();
   proxyCache.set(key, entry);
   return entry;
 }
 
-/** 给子进程用的代理环境变量（拿不到代理就返回空） */
-export function proxyEnvFor(policy, proxy) {
+/**
+ * 给子进程用的代理环境变量（拿不到代理就返回空）。
+ * port 覆盖：bwrap 沙箱里代理是「127.0.0.1:<沙箱内桥端口>」，不是宿主代理端口。
+ */
+export function proxyEnvFor(policy, proxy, { host = '127.0.0.1', port = 0 } = {}) {
   if (!proxy || policy.mode === 'all') return {};
-  const url = proxy.url;
+  const url = port ? `http://x:${proxy.token}@${host}:${port}` : proxy.url;
   return {
     HTTP_PROXY: url,
     HTTPS_PROXY: url,

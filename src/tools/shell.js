@@ -117,7 +117,7 @@ export const runShell = {
             content:
               '沙箱拒绝执行：当前运行在真隔离模式（Node 权限模型），**不允许派生进程**，shell 工具被运行时禁用。\n' +
               '  要跑命令：用 --allow-shell 启动 jail（注意子进程不受权限模型约束、隔离会降级），' +
-              '或改用 Windows 原生 / docker / wsl 沙箱后端；文件读写仍然受权限模型强制约束。',
+              '或改用平台原生沙箱后端（Linux bubblewrap / macOS sandbox-exec / Windows 原生）；文件读写仍然受权限模型强制约束。',
           });
         }
         return resolve({ ok: false, content: `命令启动失败：${err.message}` });
@@ -153,7 +153,7 @@ export const runShell = {
         if (err.code === 'ERR_ACCESS_DENIED' || /permission/i.test(err.message)) {
           return finish({
             ok: false,
-            content: '沙箱拒绝执行：真隔离模式（Node 权限模型）不允许派生进程。用 --allow-shell 启动 jail，或改用 Windows 原生 / docker / wsl 后端。',
+            content: '沙箱拒绝执行：真隔离模式（Node 权限模型）不允许派生进程。用 --allow-shell 启动 jail，或改用平台原生沙箱后端（Linux bubblewrap / macOS sandbox-exec / Windows 原生）。',
           });
         }
         finish({ ok: false, content: `命令启动失败：${err.message}` });

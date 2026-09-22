@@ -198,10 +198,11 @@
             <section class="spane" id="sec-sandbox">
               <div class="isolation-badge" id="sbIsolation"></div>
               <p class="hint">
-                决定 agent 能写哪些目录、能访问哪些网站。Windows 默认使用项目内原生写入沙箱
-                （Restricted Token + ACL + Job Object，无需 Docker）；工作区外读取仍沿用当前用户，网络规则为代理级。
-                <b>local</b> 仅靠路径与命令扫描，可以被绕过；也可选
-                <code class="inline">run.cmd --jail</code>（Node 权限模型、禁用 shell）或 Docker 后端。
+                决定 agent 能写哪些目录、能访问哪些网站。Linux 默认用 <b>bubblewrap</b>、macOS 默认用
+                <b>sandbox-exec</b>（Seatbelt）—— 和 Claude Code / Codex 同款的轻量内核边界；Windows 默认用项目内原生写入沙箱
+                （Restricted Token + ACL + Job Object）。这三者都不用装 Docker、不要管理员权限：整机只读、只有授权目录可写，
+                网络 <b>off</b> 是真断网，白/黑名单在 bwrap 下走强制代理桥。
+                <b>local</b> 仅靠路径与命令扫描，可以被绕过；Docker / WSL 作为可选后端保留。
               </p>
               <label class="field">
                 <span>作用区域</span>

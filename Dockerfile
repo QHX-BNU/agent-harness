@@ -22,6 +22,10 @@ RUN mkdir -p /workspace /data /tmp/home \
     && chmod 0555 /app/docker/entrypoint.sh \
     && chmod -R a-w /app
 
+# 容器内默认 SANDBOX_BACKEND=local：Docker 本身已经是隔离边界，不需要在容器里再套一层。
+# 想在容器内也跑 bubblewrap，需要部署方放开非特权 user namespace / seccomp：
+#   docker run --security-opt seccomp=unconfined --security-opt apparmor=unconfined ...
+# 并显式设置 SANDBOX_BACKEND=bwrap（apk add bubblewrap socat）。
 ENV NODE_ENV=production \
     MINI_HARNESS_CONTAINER=1 \
     HOST=0.0.0.0 \

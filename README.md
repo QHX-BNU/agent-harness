@@ -64,7 +64,7 @@
 | 策略 | `src/policy.js` | 按类别判定 allow/ask/deny、危险命令硬拦、异步审批 broker（超时=拒绝） |
 | 子代理 | `src/agents.js` | 独立上下文派生、并发上限、递归深度限制、结论回传、**请求级凭证继承** |
 | 工作流 | `src/workflow.js` | JSON 定义、阶段串行/阶段内并行、`{{input}}`/`{{prev}}`/`{{steps.x}}` 模板 |
-| **沙箱** | `src/sandbox.js`、`native/windows-sandbox/` | Windows Restricted Token/ACL/Job Object 原生后端；作用区域、只读、命令扫描、环境清洗、审计；Docker/WSL 可选后端 |
+| **沙箱** | `src/sandbox.js`、`src/sandbox/bwrap.js`、`src/sandbox/seatbelt.js`、`native/windows-sandbox/` | 三套免安装原生后端：Linux bubblewrap（默认）、macOS sandbox-exec/Seatbelt（默认）、Windows Restricted Token/ACL/Job Object；作用区域、只读、命令扫描、环境清洗、审计；Docker/WSL 可选后端 |
 | 持久化 | `src/store.js` | 会话 JSON + 事件 JSONL + 产物文件，可恢复、可回放 |
 | Trace | `src/trace.js` | 事件摘要、JSONL / JSON 快照 / Markdown 三种导出格式 |
 | 事件 | `src/events.js` | 30+ 事件类型，同时喂 SSE 与终端彩色日志 |
@@ -506,6 +506,9 @@ node scripts/setup-runtime.js            # 或者直接下载官方发行版
 node scripts/setup-runtime.js --check    # 看当前状态
 ```
 
+**Linux / macOS 隔离同样开箱即用**（只要装了系统级工具）：Linux 用 `bwrap`（`sudo apt install bubblewrap`），
+macOS 用系统自带的 `sandbox-exec`——都是 Claude Code / Codex 同款的内核轻量边界；工具不在就失败关闭，不会退回策略层。
+
 **Windows 隔离默认开箱即用**：Bun 控制器留在沙箱外，模型发起的 `run_shell` 会进入项目内的
 Windows 原生执行器（Restricted Token + capability SID ACL + Job Object）。不用 Docker、WSL、Node、
 管理员权限或额外下载；首次执行只用系统自带 Windows PowerShell 把项目内 16 KB C# 桥接代码编译到缓存。
@@ -515,11 +518,37 @@ Windows 原生执行器（Restricted Token + capability SID ACL + Job Object）�
 
 ## 沙箱：到底是不是真沙箱
 
-Windows 上默认的 `windows` 后端是**操作系统强制的写入/进程边界**，不依赖 Docker。它采用和
+默认策略是「**平台原生轻量边界优先**」——和 Claude Code / Codex 一样：不拉容器、不要 root、不要守护进程。
+
+| 平台 | 默认后端 | 边界怎么来的 |
+|---|---|---|
+| Linux | `bwrap`（bubblewrap） | 内核 namespace + bind mount：整机只读、只有授权根可写、独立 PID/IPC/UTS namespace 与私有 `/dev`；`off` 是真的 `--unshare-net` |
+| macOS | `seatbelt`（sandbox-exec） | Seatbelt 内核强制：默认拒绝一切，读全域、写只限授权根目录，网络按 all/off 整体开关 |
+| Windows | `windows` | Restricted Token + capability SID ACL + Job Object（下一节展开） |
+
+装了就直接用；没装（或内核禁了非特权 user namespace）时**失败关闭**，绝不悄悄降级到 `local`。
+
+```bash
+# Debian/Ubuntu
+sudo apt install bubblewrap     # 白/黑名单网络模式额外需要 socat
+# Fedora: sudo dnf install bubblewrap    Arch: sudo pacman -S bubblewrap
+```
+
+真实行为回归（Linux，会真的去越界写、真的去直连外网）：
+
+```bash
+node scripts/linux-sandbox-test.js
+# 覆盖：工作区外写入被 EROFS 拒绝、只读模式不落盘、off 无对外网卡、
+#       白名单经 socat 桥放行/名单外被拒、直连被断、PID namespace、ulimit -u、scope=full 拒写
+```
+
+**Windows 后端**则是**操作系统强制的写入/进程边界**，同样不依赖 Docker。它采用和
 Codex Windows 非管理员模式同类的结构：控制器在外，模型命令在受限令牌中；每组 roots + mode
 生成独立能力 SID，只给工作区和私有临时目录授予写权限，整棵子进程树放入 Job Object。
 
-旧的 `local` 后端仍保留作兼容，但它不是真沙箱，只是路径作用域 + 命令扫描 + 环境变量清洗，
+> 完整设计（每个参数、边界矩阵、代理桥细节、明确不做的事）见 [`docs/sandbox.md`](docs/sandbox.md)。
+
+`local` 后端仍保留作兼容（也是没有原生沙箱时的显式兜底），但它不是真沙箱，只是路径作用域 + 命令扫描 + 环境变量清洗，
 可以被编码命令等方式绕过。`scripts/sandbox-breach-test.js` 会真实攻击它：
 
 ```
@@ -533,6 +562,8 @@ Codex Windows 非管理员模式同类的结构：控制器在外，模型命令
 
 | 等级 | 怎么开 | 强制力 | 代价 |
 |---|---|---|---|
+| 🛡 **Linux bubblewrap** | Linux 默认；`SANDBOX_BACKEND=bwrap` | 内核 namespace + bind mount 强制写入边界；`off` 是内核级断网，白/黑名单是内核断网 + 强制代理桥 | 读整个文件系统（Claude Code / Codex 同语义）；没有 cgroup 内存/CPU 配额 |
+| 🛡 **macOS Seatbelt** | macOS 默认；`SANDBOX_BACKEND=seatbelt` | sandbox-exec 内核强制写白名单与网络开关 | 不支持按主机名的白/黑名单 |
 | 🛡 **Windows 原生** | 默认；`SANDBOX_BACKEND=windows` | Restricted Token + ACL 阻止越界写入，Job Object 限制进程数/内存并在中止时清理整棵进程树 | 工作区外读取仍沿用当前用户权限；网络规则是代理级 |
 | 🛡 **Docker 容器** | `SANDBOX_BACKEND=docker` | 独立文件系统/进程/网络命名空间 | 可选，需要已安装 Docker |
 | 🔒 **运行时强制** | `run.cmd --jail` / `./run.sh --jail` | **Node 权限模型**：工作区外的读写、列目录、派生进程全部被运行时直接拒绝（`ERR_ACCESS_DENIED`），跟正则无关 | **shell 工具被禁用**（加 `--allow-shell` 可保留，但隔离降级）；需要本机有 Node |
@@ -620,6 +651,14 @@ $env:SANDBOX_NETWORK_LIST="api.github.com,*.npmjs.org,localhost:8080"
    （带随机令牌，防止本机其它程序蹭用），**在建立连接时按主机放行/拒绝**。curl / git /
    python / npm 都走它；网络被关时连本机目标也连不上
 
+代理的强制力取决于后端——只有内核级后端才敢说「绕不过去」：
+
+| 后端 | `off` | `whitelist` / `blacklist` |
+|---|---|---|
+| `bwrap`（Linux） | 独立 network namespace：沙箱里没有对外网卡，直连必然失败 | **强制**：`--unshare-net` + 唯一的 unix socket 代理桥（沙箱内 socat 转发），没有第二条出路 |
+| `seatbelt` / `docker` | Seatbelt 直接拒绝 `network*`；Docker 用 `--network none` | 不支持：明确报错，不假装规则生效 |
+| `windows` / `wsl` / `local` | 代理级拒绝 | 代理级：刻意绕过代理直连的程序能绕开（界面会如实标注） |
+
 ```powershell
 # 实测：白名单内连得上、名单外 403、无令牌 407、CONNECT 隧道同样拦
 node scripts/network-test.js      # 57 项
@@ -681,13 +720,17 @@ Invoke-WebRequest 'http://127.0.0.1:5175/api/sessions/export' -OutFile "backup-$
 
 | 后端 | 是否真隔离 | 说明 |
 |---|---|---|
+| `bwrap` bubblewrap | **是（内核）** | **Linux 默认**；整机只读 + 授权根可写 + 独立 PID/IPC/UTS namespace；需要 `bubblewrap`（白/黑名单还要 `socat`） |
+| `seatbelt` sandbox-exec | **是（内核）** | **macOS 默认**；默认拒绝一切，读全域、写白名单；系统自带 |
 | `windows` Windows 原生沙箱 | **写入/进程是** | **Windows 默认、免安装**；Restricted Token + 独立 capability SID ACL + Job Object；读取沿用当前用户 |
-| `local` 本地策略沙箱 | 否 | 路径作用域 + 命令扫描 + 环境变量清洗，永远可用 |
+| `local` 本地策略沙箱 | 否 | 路径作用域 + 命令扫描 + 环境变量清洗；可被绕过，只作兜底 |
 | `docker` | **是** | `docker run --rm --network none -v <root>:/work`，需要 docker 守护进程在跑 |
 | `wsl` | 部分 | 命令跑在 WSL 里，但 `/mnt/c` 仍映射到 Windows 磁盘 |
 
-后端可用性由**实际探测**决定。`windows` 检查项目内执行器和系统 PowerShell；Docker/WSL 分别执行
-`docker info`、`wsl -e sh -c exit 0`。不可用时直接失败关闭，不会悄悄改用 `local`。
+后端可用性由**实际探测**决定：`bwrap` 会真跑一次「只读根 + 新 PID namespace」的最小沙箱
+（装了也可能因内核禁掉非特权 user namespace 而不可用）；`seatbelt` 看 `sandbox-exec`；
+`windows` 检查项目内执行器和系统 PowerShell；Docker/WSL 分别执行 `docker info`、`wsl -e sh -c exit 0`。
+不可用时直接失败关闭，不会悄悄改用 `local`。
 
 ### 本地策略沙箱具体拦什么
 
@@ -708,7 +751,13 @@ Invoke-WebRequest 'http://127.0.0.1:5175/api/sessions/export' -OutFile "backup-$
 工作区外写入；派生的 Bun/PowerShell/Git 也继承同一受限令牌。内置文件工具则继续在控制器中接受
 `sandbox.resolve()` 路径检查——这与 Claude Code 将 shell 的 OS 沙箱和工具权限策略分层的做法一致。
 
-当前没有实现的强边界是：工作区外**读取保密**、无管理员权限下的强制断网、独立桌面/GUI 消息隔离。
+Linux/macOS 的内核后端（bwrap / Seatbelt）用的是同一套分层：内核只管「写到哪里」，命令扫描默认
+仍开着，所以「读工作区外文件」的命令会被策略层再拦一次。想完全对齐 Claude Code / Codex 的
+「内核管边界、审批管危险操作」语义，把 `SANDBOX_STRICT=0` 打开即可（危险命令仍然硬拦）。
+
+当前没有实现的强边界是：工作区外**读取保密**（Linux bwrap 与 macOS Seatbelt 都是「读全域、写白名单」，
+和 Claude Code / Codex 同语义）、独立桌面/GUI 消息隔离。Windows/WSL/local 后端下也没有内核级强制断网；
+Linux 的 bwrap 后端是例外——`off` 与白/黑名单都是内核级断网（独立 network namespace + 强制代理桥）。
 另外，为让 Windows 会话对象正常初始化，restricted SID 集合包含 Everyone/登录会话 SID；如果某个外部对象
 本来就显式允许 Everyone 写，它仍可能可写。因此界面显示“Windows 原生写入沙箱”，不会把它冒充成容器。
 
@@ -733,7 +782,7 @@ Invoke-WebRequest 'http://127.0.0.1:5175/api/sessions/export' -OutFile "backup-$
     function calling、token 用量，并拉取该端点的模型列表。key 只存在这台浏览器的
     `localStorage`，留空则回落到服务端环境变量。
   - **交互**：默认审批模式、每轮自动召回记忆条数。
-  - **沙箱**：作用区域（工作区/主目录/自定义/全盘）、权限（可写/只读）、执行后端（Windows 原生/本地策略/Docker/WSL）、
+  - **沙箱**：作用区域（工作区/主目录/自定义/全盘）、权限（可写/只读）、执行后端（Linux bubblewrap / macOS Seatbelt / Windows 原生 / 本地策略 / Docker / WSL）、
     严格模式开关、**自测规则**按钮，以及当前实际根目录预览。
   - **任务**：模型用 `todo_write` 维护的清单，实时同步。
   - **记忆**：搜索 / 新增 / 删除 / 分层统计。
@@ -798,7 +847,9 @@ node scripts/e2e.js            # 对话链路：工具调用 + 审批 + 结果�
 node scripts/ui-check.js       # 前端：设置 / 审批 / 面板 / 布局体检 / 深色主题
 node scripts/ui-key-test.js    # 界面填 API key 专项：填 key → 测试连接 → 保存 → 真发一轮（需 fake-llm）
 node scripts/trace-test.js     # Trace：事件记录 → 标签页/弹窗查看 → 三种格式导出（29 项）
-node scripts/sandbox-test.js   # 沙箱：作用区域/权限/命令扫描/环境清洗/后端/审计/界面（86 项）
+node scripts/sandbox-test.js   # 沙箱：作用区域/权限/命令扫描/环境清洗/后端构造/审计/界面
+node scripts/linux-sandbox-test.js   # Linux bubblewrap 真机边界：越权写/只读/断网/白名单桥/PID namespace（需 Linux + bwrap）
+node scripts/macos-sandbox-test.js   # macOS Seatbelt 真机边界：越权写/只读/断网（需 macOS）
 node scripts/windows-sandbox-test.js # Windows 原生边界：run_shell/越权写/子进程/只读/缓存不可篡改/Job Object（20 项）
 node scripts/jail-test.js      # Node 权限模型验收：--jail 下的隔离等级与越权拦截（13 项）
 node scripts/markdown-test.js  # Markdown：65 条语法与安全断言 + 全特性渲染截图
@@ -831,7 +882,9 @@ node scripts/ui-key-test.js    # 在界面上填 key 连它，验证「填 key �
 
 ## 这个骨架**没有**做的事
 
-- **Windows 原生沙箱不是完整容器**：它已用 OS 强制工作区写入边界和进程树限制，但工作区外读取沿用当前用户，代理网络规则也不是防恶意直连的防火墙；完整保密/断网仍用 Docker 或虚拟机。
+- **原生沙箱的边界不是一个模子**：Linux bwrap 与 macOS Seatbelt 强制「只读整机 + 写白名单」，读全域（与 Claude Code / Codex 同语义），
+  不提供读取保密；Windows 原生后端强制写入与进程树，工作区外读取沿用当前用户；`local` 只是策略层。
+  需要同时隔离读取与网络时，Docker 或虚拟机仍是更强选项（Linux 上 bwrap 的 `off`/白黑名单已经是内核级断网）。
 - **记忆没有向量检索**：词元重叠在小规模下够用，量大了要换 embedding + 向量库。
 - **工作流没有条件分支/循环**：只有「阶段串行 + 阶段内并行」，没有 if/else 和 while。
 - **没有多租户**：单进程单工作区，会话之间靠 sessionId 隔离。

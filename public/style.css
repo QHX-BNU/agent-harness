@@ -783,6 +783,7 @@ button.link-btn:hover { text-decoration: underline; background: transparent; bor
   border: 1px solid var(--border);
   background: var(--surface-2);
 }
+.isolation-badge.level-namespace { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); background: color-mix(in srgb, var(--ok) 7%, var(--surface-2)); }
 .isolation-badge.level-container { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
 .isolation-badge.level-os { color: var(--cyan); border-color: color-mix(in srgb, var(--cyan) 40%, var(--border)); background: color-mix(in srgb, var(--cyan) 7%, var(--surface-2)); }
 .isolation-badge.level-runtime { color: var(--cyan); border-color: color-mix(in srgb, var(--cyan) 40%, var(--border)); }

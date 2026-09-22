@@ -19,7 +19,17 @@ import { createFeishuChannel } from './src/channels/feishu.js';
 import { setRuntimeModel, describeRuntimeModel } from './src/runtime-model.js';
 import { IdentityStore } from './src/identities.js';
 import { createProvider, listProviders, resolveProviderConfig } from './src/providers/index.js';
-import { createSandbox, SCOPE_PRESETS, MODES, backendAvailable, controllerAtRisk, resolveSandboxRoots } from './src/sandbox.js';
+import {
+  createSandbox,
+  SCOPE_PRESETS,
+  MODES,
+  backendAvailable,
+  backendCatalog,
+  defaultBackend,
+  controllerAtRisk,
+  resolveSandboxRoots,
+  probe,
+} from './src/sandbox.js';
 import { isolationSummary } from './src/isolation.js';
 import { NETWORK_MODES } from './src/network-policy.js';
 import { runTurn } from './src/loop.js';
@@ -176,27 +186,13 @@ function openSSE(req, res, sessionId) {
 }
 
 // ---------- 沙箱 ----------
-/** 沙箱可用性（UI 里用来禁用没装的后端） */
+/** 沙箱后端清单：直接复用 src/sandbox.js 的同一份（避免界面说法和后端实现漂移） */
 function sandboxAvailability() {
-  return [
-    {
-      id: 'windows',
-      label: 'Windows 原生沙箱',
-      available: backendAvailable.windows(),
-      note: '免安装：Restricted Token + capability SID ACL 强制写入边界，Job Object 管住进程树；读取沿用当前用户，网络规则为代理级',
-    },
-    { id: 'local', label: '本地策略沙箱', available: true, note: '路径作用域 + 命令扫描 + 环境变量清洗；不是内核隔离' },
-    {
-      id: 'docker',
-      label: 'Docker 容器',
-      available: backendAvailable.docker(),
-      note: '真正的文件系统/进程隔离，需要 docker 且守护进程在跑',
-    },
-    { id: 'wsl', label: 'WSL', available: backendAvailable.wsl(), note: '命令进入 WSL，但 Windows 磁盘与互操作通常仍可访问；不是完整容器边界' },
-  ];
+  return backendCatalog();
 }
 
 function sandboxCatalog() {
+  const backend = config.sandbox?.backend || defaultBackend();
   return {
     defaults: config.sandbox,
     presets: Object.entries(SCOPE_PRESETS).map(([id, p]) => ({ id, ...p })),
@@ -204,13 +200,18 @@ function sandboxCatalog() {
     backends: sandboxAvailability(),
     workspace: config.workspace,
     home: os.homedir(),
-    // 现在到底是什么边界：container / os / runtime / policy。
+    // 现在到底是什么边界：namespace / os / container / runtime / policy。
     isolation: isolationSummary({
-      sandbox: { backend: config.sandbox?.backend || (process.platform === 'win32' ? 'windows' : 'local') },
-      backendReady:
-        config.sandbox?.backend === 'local'
-          ? true
-          : backendAvailable[config.sandbox?.backend]?.() ?? false,
+      sandbox: { backend },
+      backendReady: backend === 'local' ? true : backendAvailable[backend]?.() ?? false,
+      networkMode: config.sandbox?.network || 'all',
+      // 目录页里只能静态判断：bwrap 下 off 与白/黑名单都是内核级强制；docker 的 off 是真断网
+      networkEnforced: (() => {
+        const net = config.sandbox?.network || 'all';
+        if (backend === 'bwrap') return net !== 'all';
+        if (backend === 'docker') return net === 'off';
+        return false;
+      })(),
     }),
     networkModes: Object.entries(NETWORK_MODES).map(([id, m]) => ({ id, ...m })),
   };
@@ -222,13 +223,25 @@ function sandboxCatalog() {
  */
 function preflightSandbox(session, requested = {}) {
   const merged = { ...(config.sandbox || {}), ...(session?.sandboxConfig || {}), ...(requested || {}) };
-  const backend = merged.backend || (process.platform === 'win32' ? 'windows' : 'local');
+  const backend = merged.backend || defaultBackend();
   if (!backendAvailable[backend]) throw new Error(`未知执行后端 "${backend}"`);
   if (!backendAvailable[backend]()) {
-    throw new Error(`执行后端 ${backend} 当前不可用；命令不会静默回落。请检查组件状态或显式改用 local`);
+    const extra =
+      backend === 'bwrap'
+        ? '（Linux 上需要 bubblewrap：sudo apt install bubblewrap；容器里还要允许非特权 user namespace）'
+        : backend === 'seatbelt'
+          ? '（macOS 系统自带 sandbox-exec；被企业策略禁用时无法启用）'
+          : '';
+    throw new Error(`执行后端 ${backend} 当前不可用${extra}；命令不会静默回落。请检查组件状态或显式改用 local`);
   }
   if (backend === 'docker' && ['whitelist', 'blacklist'].includes(merged.network)) {
     throw new Error(`Docker 后端暂不支持 ${merged.network} 网络模式；请选择 all 或 off`);
+  }
+  if (backend === 'seatbelt' && ['whitelist', 'blacklist'].includes(merged.network)) {
+    throw new Error(`sandbox-exec（Seatbelt）无法按主机名过滤网络，不支持 ${merged.network}；请选择 all / off，或改用 bwrap 后端`);
+  }
+  if (backend === 'bwrap' && ['whitelist', 'blacklist'].includes(merged.network) && !probe('socat')) {
+    throw new Error(`bwrap 的 ${merged.network} 模式需要 socat 搭代理桥；请安装 socat（apt install socat）或改用 all / off`);
   }
   return merged;
 }
@@ -935,7 +948,7 @@ server.listen(config.port, config.host, () => {
   // 沙箱边界如实打出来：可用性 + 是否把控制器自己的代码目录圈进了可写范围
   {
     const sb = config.sandbox || {};
-    const backend = sb.backend || (process.platform === 'win32' ? 'windows' : 'local');
+    const backend = sb.backend || defaultBackend();
     const usable = backendAvailable[backend]?.() ?? false;
     const roots = resolveSandboxRoots({
       scope: sb.scope || 'workspace',

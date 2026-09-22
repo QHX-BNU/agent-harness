@@ -443,8 +443,8 @@
     els.sbScope.value = sb.scope || 'workspace';
     els.sbMode.value = sb.mode || 'write';
     const wantedBackend = sb.backend || cat.defaults?.backend || 'local';
-    // 不可用的后端仍保持选中并明确标成「未安装」；绝不能悄悄降级到 local。
-    els.sbBackend.value = cat.backends.some((b) => b.id === wantedBackend) ? wantedBackend : 'local';
+    // 不可用的后端仍保持选中并明确标成「未安装」；绝不会悄悄降级到 local。
+    els.sbBackend.value = cat.backends.some((b) => b.id === wantedBackend) ? wantedBackend : cat.defaults?.backend || 'local';
     els.sbRoots.value = (sb.customRoots || []).join('\n');
     els.sbStrict.checked = sb.strict !== false;
 
@@ -495,6 +495,44 @@
     const container = base.containerRuntime;
     const jail = base.runtimeJail;
 
+    if (backend === 'bwrap') {
+      const netHint =
+        cfg.network === 'off'
+          ? '网络由独立 network namespace 真断开。'
+          : cfg.network === 'whitelist' || cfg.network === 'blacklist'
+            ? '网络走强制代理桥：沙箱里没有直连通道，只能连策略代理。'
+            : '网络不做限制（all）。';
+      return option?.available
+        ? {
+            level: 'namespace',
+            label: 'Linux 轻量沙箱（bubblewrap）',
+            detail: `内核 namespace + bind mount（Claude Code / Codex 同款）：整机只读、只有授权目录可写、独立 PID/IPC/UTS namespace 与私有 /dev。${netHint}`,
+            backend,
+          }
+        : {
+            level: 'policy',
+            label: 'bubblewrap 后端不可用',
+            detail:
+              '没装 bubblewrap 或内核禁用了非特权 user namespace；命令会失败关闭，不会回落到 local。安装：sudo apt install bubblewrap。',
+            backend,
+          };
+    }
+    if (backend === 'seatbelt') {
+      return option?.available
+        ? {
+            level: 'os',
+            label: 'macOS 沙箱（Seatbelt）',
+            detail:
+              '由 macOS 内核强制执行：默认拒绝一切、读全域、写只限授权目录；网络按 all/off 整体开关（Seatbelt 无法按主机名过滤，不支持白/黑名单）。',
+            backend,
+          }
+        : {
+            level: 'policy',
+            label: 'sandbox-exec 后端不可用',
+            detail: '当前系统里找不到可用的 sandbox-exec；命令会失败关闭，不会静默回落。',
+            backend,
+          };
+    }
     if (backend === 'windows') {
       return option?.available
         ? {
@@ -554,7 +592,7 @@
     const iso = isolationFor(cfg);
     if (!els.sbIsolation || !iso) return iso;
     els.sbIsolation.className = `isolation-badge level-${iso.level || 'policy'}`;
-    const icon = { container: '🛡', os: '🛡', runtime: '🔒', policy: '⚠' }[iso.level] || '•';
+    const icon = { namespace: '🛡', container: '🛡', os: '🛡', runtime: '🔒', policy: '⚠' }[iso.level] || '•';
     els.sbIsolation.textContent = `${icon} 隔离等级：${iso.label}`;
     els.sbIsolation.title = iso.detail || '';
     return iso;
@@ -608,6 +646,7 @@
     const netMode = cfg.network || 'all';
     const netLabel = cat?.networkModes?.find((m) => m.id === netMode)?.label || netMode;
     const netList = cfg.networkList || [];
+    const backendInfo = cat?.backends?.find((b) => b.id === cfg.backend);
     els.sbPreview.innerHTML =
       `<div>作用区域：<b>${esc(scopeLabel)}</b></div>` +
       `<div>实际根目录：${esc(rootLine)}</div>` +
@@ -620,6 +659,12 @@
       // 可写范围圈进控制器代码目录时，别让界面假装还有隔离
       (applied?.controller?.exposed
         ? `<div style="color:var(--warn)">⚠ 可写范围包含控制器代码目录（${esc(applied.controller.appRoot || '')}）：改这里的代码就是改下次运行，边界保护不了 harness 自身</div>`
+        : '') +
+      // 后端不可用时给安装提示：会失败关闭，但用户得知道怎么修
+      (backendInfo && !backendInfo.available
+        ? `<div style="color:var(--warn)">⚠ ${esc(backendInfo.label)} 当前不可用${
+            backendInfo.install ? `（${esc(backendInfo.install)}）` : ''
+          }：命令会失败关闭，不会回落到 local</div>`
         : '');
     const iso = renderIsolation(cfg);
     updateSandboxBadge(cfg, iso);
@@ -629,7 +674,7 @@
     const cat = state.sandboxCatalog;
     const scopeLabel = cat?.presets.find((p) => p.id === cfg.scope)?.label || cfg.scope;
     const short = { workspace: '工作区', home: '主目录', custom: '自定义', full: '全盘' }[cfg.scope] || cfg.scope;
-    const backend = { windows: 'Windows 原生', local: 'local', docker: 'Docker', wsl: 'WSL' }[cfg.backend] || cfg.backend || 'local';
+    const backend = { bwrap: 'bubblewrap', seatbelt: 'Seatbelt', windows: 'Windows 原生', local: 'local', docker: 'Docker', wsl: 'WSL' }[cfg.backend] || cfg.backend || 'local';
     els.sbBadge.textContent = `🔒 ${short} · ${cfg.mode === 'readonly' ? '只读' : '可写'} · ${backend}`;
     els.sbBadge.title = `沙箱：${scopeLabel} · ${cfg.mode === 'readonly' ? '只读' : '可写'} · 后端 ${backend} · ${iso?.label || ''}`;
     els.sbBadge.classList.toggle('ro', cfg.mode === 'readonly');

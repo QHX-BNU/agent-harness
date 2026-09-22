@@ -1,19 +1,35 @@
 // 沙箱层：决定 agent 到底能碰到什么。
 //
 // 设计原则（很重要，别自欺欺人）：
-//   1. Windows 默认把模型命令放进 Restricted Token + ACL + Job Object；控制器仍在边界外。
-//   2. local 是兼容用策略后端；docker / wsl 是可选后端。缺工具时明确报不可用，
+//   1. Linux 默认 bubblewrap、macOS 默认 sandbox-exec（Seatbelt）—— 和 Claude Code / Codex
+//      同款的轻量边界：内核 namespace / Seatbelt 强制，不用装 Docker、不要 root、不要守护进程。
+//   2. Windows 默认把模型命令放进 Restricted Token + ACL + Job Object；控制器仍在边界外。
+//   3. local 是兼容用策略后端；docker / wsl 是可选后端。缺工具时明确报不可用，
 //      绝不静默回落到宿主机执行。
-//   3. 每一次放行/拒绝都进审计（trace + 会话里可查），否则沙箱等于没有。
+//   4. 每一次放行/拒绝都进审计（trace + 会话里可查），否则沙箱等于没有。
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createNetworkPolicy, getNetworkProxy, proxyEnvFor, normalizeMode, NETWORK_MODES } from './network-policy.js';
+import { probe, probeRunnable } from './sandbox/probe.js';
+import {
+  BWRAP_BIN,
+  BWRAP_INSTALL_HINT,
+  BWRAP_BRIDGE_PORT,
+  bwrapAvailable,
+  bwrapCapabilities,
+  bwrapDiagnostics,
+  socatAvailable,
+  buildBwrapPlan,
+} from './sandbox/bwrap.js';
+import { SEATBELT_BIN, seatbeltAvailable, buildSeatbeltPlan } from './sandbox/seatbelt.js';
 import { detectRuntimeJail, isolationSummary } from './isolation.js';
 import { ensureDir } from './fsutil.js';
+
+// 兼容旧引用：probe / probeRunnable 以前就从这个模块导出
+export { probe, probeRunnable } from './sandbox/probe.js';
 
 export class SandboxError extends Error {
   constructor(message, { rule = 'scope', target = '' } = {}) {
@@ -25,6 +41,8 @@ export class SandboxError extends Error {
 }
 
 const isWin = process.platform === 'win32';
+const isMac = process.platform === 'darwin';
+const isLinux = process.platform === 'linux';
 const norm = (p) => (isWin ? path.resolve(p).toLowerCase() : path.resolve(p));
 
 /** 作用区域预设：用户可选的就是这几个 */
@@ -40,7 +58,15 @@ export const MODES = {
   readonly: { label: '只读', description: '禁止任何写操作与可能改盘的命令' },
 };
 
-export const EXEC_BACKENDS = new Set(['windows', 'local', 'docker', 'wsl']);
+export const EXEC_BACKENDS = new Set(['bwrap', 'seatbelt', 'windows', 'local', 'docker', 'wsl']);
+
+/** 平台默认后端：和 Claude Code / Codex 一样，优先走轻量原生边界，而不是容器或纯策略 */
+export function defaultBackend(platform = process.platform) {
+  if (platform === 'linux') return 'bwrap';
+  if (platform === 'darwin') return 'seatbelt';
+  if (platform === 'win32') return 'windows';
+  return 'local';
+}
 
 const APP_ROOT = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 const WINDOWS_RUNNER = path.join(APP_ROOT, 'scripts', 'windows-sandbox-runner.ps1');
@@ -162,6 +188,37 @@ export function resolveSandboxRoots({ scope = 'workspace', customRoots = [], wor
   return list.length ? list : [path.resolve(workspace)];
 }
 
+/**
+ * bwrap 代理桥的 unix socket 路径。
+ *
+ * 两个约束：Linux 的 sun_path 上限 108 字节（所以挑短路径）；路径必须在沙箱里可见
+ * （我们对 / 只读绑定、不覆盖 /tmp，所以普通路径天然可见）。
+ */
+function pickBridgeSocketPath({ tempDir = null, sessionId = null, network = 'whitelist', list = [] } = {}) {
+  // 路径按「会话 + 策略」稳定生成：同一个会话复用同一个 socket，代理才能复用（否则每条消息都新起一个）
+  const tag = crypto
+    .createHash('sha1')
+    .update([sessionId || 'no-session', network, ...(Array.isArray(list) ? list : [])].join('\0'))
+    .digest('hex')
+    .slice(0, 10);
+  const tmpRoot = path.resolve(os.tmpdir());
+  const dirs = [
+    // 首选：XDG_RUNTIME_DIR（/run/user/<uid>，短、私有、沙箱里原路径可见）
+    process.env.XDG_RUNTIME_DIR ? path.join(process.env.XDG_RUNTIME_DIR, 'mini-harness-net') : null,
+    tempDir ? path.join(tempDir, 'net') : null,
+    // 兜底：项目自己的 .sandbox-tmp（同样不在 /tmp 下）
+    path.join(APP_ROOT, '.sandbox-tmp', 'net'),
+  ].filter(Boolean);
+  for (const dir of dirs) {
+    const abs = path.resolve(dir);
+    // 沙箱里 /tmp 会被换成私有目录，所以 socket 绝对不能放在宿主 tmp 下，否则沙箱看不见它
+    if (abs === tmpRoot || abs.startsWith(tmpRoot + path.sep)) continue;
+    const file = path.join(abs, `${tag}.sock`);
+    if (file.length <= 100) return file; // sun_path 上限 108 字节，留点余量
+  }
+  return null;
+}
+
 export function createSandbox({
   scope = 'workspace',
   customRoots = [],
@@ -182,16 +239,63 @@ export function createSandbox({
   if (!SCOPE_PRESETS[scope]) throw new SandboxError(`未知作用区域 "${scope}"`, { rule: 'config' });
   if (!MODES[mode]) throw new SandboxError(`未知权限模式 "${mode}"`, { rule: 'config' });
   if (!EXEC_BACKENDS.has(backend)) throw new SandboxError(`未知执行后端 "${backend}"`, { rule: 'config' });
+  // 平台不匹配时立刻说清楚，别等到构造计划才报「找不到 socket」之类的间接错误
+  if (backend === 'bwrap' && !isLinux) {
+    throw new SandboxError('bubblewrap 沙箱只能在 Linux 上使用；请改用平台默认后端', { rule: 'backend', target: backend });
+  }
+  if (backend === 'seatbelt' && !isMac) {
+    throw new SandboxError('sandbox-exec（Seatbelt）只能在 macOS 上使用；请改用平台默认后端', { rule: 'backend', target: backend });
+  }
   const containerImage = String(image || '').trim() || 'oven/bun:1.4.2-alpine';
 
   // 网络策略：all / off / whitelist / blacklist（兼容旧的 network: true/false）
   const networkPolicy = createNetworkPolicy({ mode: normalizeMode(network, 'all'), list: networkList });
+  const filteredNetwork = networkPolicy.mode === 'whitelist' || networkPolicy.mode === 'blacklist';
+
+  // Seatbelt 的过滤器是路径/操作级的，没有「按主机名放行」的能力：与其假装规则生效，不如明确拒绝
+  if (backend === 'seatbelt' && filteredNetwork) {
+    throw new SandboxError(
+      `sandbox-exec（Seatbelt）后端无法按主机名过滤网络，不支持 ${networkPolicy.mode}；请选 all / off，或改用 bwrap 后端`,
+      { rule: 'network', target: networkPolicy.mode },
+    );
+  }
+
+  // bwrap 的白/黑名单：沙箱在独立 network namespace 里，唯一出网通道是这个 unix socket 代理桥
+  const bridgeSocketPath =
+    backend === 'bwrap' && filteredNetwork
+      ? pickBridgeSocketPath({
+          tempDir,
+          sessionId,
+          network: networkPolicy.mode,
+          list: networkPolicy.rules.map((r) => r.raw),
+        })
+      : null;
+  if (backend === 'bwrap' && filteredNetwork && !bridgeSocketPath) {
+    throw new SandboxError(
+      '找不到合适的 unix socket 路径来搭 bwrap 代理桥（候选路径太长或都落在 /tmp 下）；' +
+        '请设置 XDG_RUNTIME_DIR，或把网络模式改成 all / off',
+      { rule: 'network', target: 'bridge' },
+    );
+  }
+  if (backend === 'bwrap' && filteredNetwork && !socatAvailable()) {
+    throw new SandboxError(
+      `bwrap 的 ${networkPolicy.mode} 模式需要 socat 搭代理桥（沙箱里没有网络接口，只能走桥）；` +
+        '当前机器没找到 socat：请安装（apt install socat / dnf install socat），或把网络模式改成 all / off',
+      { rule: 'network', target: 'socat' },
+    );
+  }
+  if (bridgeSocketPath) ensureDir(path.dirname(bridgeSocketPath));
+
   // 非 all 模式要起本地代理；创建时就把它拉起来，等它绑定端口（shell 工具执行前会 await ready()）
-  const proxyHandle = networkPolicy.mode === 'all' || backend === 'docker' ? null : getNetworkProxy(networkPolicy, {
-    onDecision: (d) => {
-      if (!d.ok) emit?.({ type: 'network_denied', host: d.host, port: d.port, reason: d.reason });
-    },
-  });
+  const proxyHandle =
+    networkPolicy.mode === 'all' || backend === 'docker'
+      ? null
+      : getNetworkProxy(networkPolicy, {
+          unixSocketPath: bridgeSocketPath,
+          onDecision: (d) => {
+            if (!d.ok) emit?.({ type: 'network_denied', host: d.host, port: d.port, reason: d.reason });
+          },
+        });
   const readyPromise = proxyHandle ? proxyHandle.ready : Promise.resolve(null);
 
   const roots = resolveSandboxRoots({ scope, customRoots, workspace });
@@ -353,6 +457,119 @@ export function createSandbox({
     const cwdAbs = resolve(cwd, { tool });
     const env = cleanEnv();
     const netFlag = networkPolicy.mode === 'all' ? 'bridge' : 'none';
+    const sandboxTag = String(sessionId || 'shell').replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 40) || 'shell';
+
+    // ---------- Linux：bubblewrap（Claude Code / Codex 同款轻量边界）----------
+    if (backend === 'bwrap') {
+      if (!isLinux) {
+        throw new SandboxError('bubblewrap 沙箱只能在 Linux 上使用', { rule: 'backend', target: backend });
+      }
+      const diag = bwrapDiagnostics();
+      if (!diag.ok) {
+        throw new SandboxError(`bubblewrap 沙箱不可用：${diag.reason}；命令已拒绝，不会回落到本地执行`, {
+          rule: 'backend',
+          target: BWRAP_BIN,
+        });
+      }
+      if (scope === 'full' && mode === 'write') {
+        throw new SandboxError('bubblewrap 沙箱拒绝把整个文件系统设为可写；请选工作区、主目录或自定义目录', {
+          rule: 'scope',
+          target: roots[0],
+        });
+      }
+
+      // 白/黑名单：沙箱里没有网络接口，唯一出口是宿主代理的 unix socket + 沙箱内 socat 桥
+      let bridge = null;
+      if (filteredNetwork) {
+        const socket = proxyHandle?.unixPath;
+        if (!socket) {
+          throw new SandboxError('网络白/黑名单需要 bwrap 代理桥，但代理 socket 没有绑定成功；命令已拒绝', {
+            rule: 'network',
+            target: 'proxy',
+          });
+        }
+        bridge = { socketPath: socket, port: BWRAP_BRIDGE_PORT };
+        // 沙箱里的代理是本地桥（127.0.0.1:3128），不是宿主代理端口
+        Object.assign(env, proxyEnvFor(networkPolicy, proxyHandle, { port: BWRAP_BRIDGE_PORT }));
+      } else if (networkPolicy.mode === 'off') {
+        // 沙箱根本没有网络接口，代理变量留着只会误导
+        for (const k of [
+          'HTTP_PROXY',
+          'HTTPS_PROXY',
+          'ALL_PROXY',
+          'http_proxy',
+          'https_proxy',
+          'all_proxy',
+          'NODE_USE_ENV_PROXY',
+        ]) {
+          delete env[k];
+        }
+      }
+
+      // 私有可写临时目录；只读模式不给（语义就是一个字节都不许落盘）
+      let runTmp = null;
+      if (mode === 'write') {
+        runTmp = path.join(path.resolve(tempDir || path.join(os.tmpdir(), 'mini-harness-sandbox')), 'bwrap', sandboxTag);
+        // 沙箱里的 /tmp 就是它：每次执行前清空，效果等价于每条命令一个私有 tmpfs
+        try {
+          fs.rmSync(runTmp, { recursive: true, force: true });
+        } catch {
+          /* 清不掉就让 ensureDir 报错，别在脏目录上继续跑 */
+        }
+        ensureDir(runTmp);
+        // 注意必须用沙箱内路径：宿主路径在沙箱里是只读的原路径，写不进去
+        env.TEMP = '/tmp';
+        env.TMP = '/tmp';
+        env.TMPDIR = '/tmp';
+      }
+
+      const plan = buildBwrapPlan({
+        command,
+        cwd: cwdAbs,
+        roots,
+        mode,
+        network: networkPolicy.mode,
+        bridge,
+        tmpDir: runTmp,
+        pidsLimit,
+        capabilities: bwrapCapabilities(),
+      });
+      return { ...plan, cwd: cwdAbs, env, backend: 'bwrap', cwdAbs, networkBridge: Boolean(bridge) };
+    }
+
+    // ---------- macOS：sandbox-exec / Seatbelt ----------
+    if (backend === 'seatbelt') {
+      if (!isMac) {
+        throw new SandboxError('sandbox-exec（Seatbelt）只能在 macOS 上使用', { rule: 'backend', target: backend });
+      }
+      if (!backendAvailable.seatbelt()) {
+        throw new SandboxError('macOS 的 sandbox-exec 不可用；命令已拒绝，不会回落到本地执行', {
+          rule: 'backend',
+          target: SEATBELT_BIN,
+        });
+      }
+      if (filteredNetwork) {
+        throw new SandboxError('sandbox-exec 无法按主机名过滤网络，不支持白/黑名单；请选 all / off，或改用 bwrap 后端', {
+          rule: 'network',
+          target: networkPolicy.mode,
+        });
+      }
+      if (scope === 'full' && mode === 'write') {
+        throw new SandboxError('sandbox-exec 沙箱拒绝把整个文件系统设为可写；请选工作区、主目录或自定义目录', {
+          rule: 'scope',
+          target: roots[0],
+        });
+      }
+      const plan = buildSeatbeltPlan({
+        command,
+        cwd: cwdAbs,
+        roots,
+        mode,
+        network: networkPolicy.mode,
+        tmpPaths: [os.tmpdir(), '/tmp', '/private/tmp', tempDir].filter(Boolean),
+      });
+      return { ...plan, cwd: cwdAbs, env, backend: 'seatbelt', cwdAbs };
+    }
 
     if (backend === 'windows') {
       if (!isWin) {
@@ -559,17 +776,41 @@ export function createSandbox({
         strict,
         image: containerImage,
         limits: { memory: memoryLimit, cpus: cpuLimit, pids: pidsLimit },
+        // 如实说明哪些上限真的被强制执行：bwrap 没有 cgroup，写上限只是空话
+        limitsEnforced:
+          backend === 'docker'
+            ? { memory: true, cpus: true, pids: true, note: 'Docker cgroup 强制。' }
+            : backend === 'windows'
+              ? { memory: true, cpus: true, pids: true, note: 'Job Object 强制内存/进程数，CPU 用速率上限。' }
+              : backend === 'bwrap'
+                ? {
+                    memory: false,
+                    cpus: false,
+                    pids: true,
+                    note: 'bubblewrap 没有 cgroup 配额：内存/CPU 上限不生效，进程数用 ulimit -u 兜底。',
+                  }
+                : { memory: false, cpus: false, pids: false, note: '该后端不强制资源上限。' },
         network: networkPolicy.mode,
         networkLabel: networkPolicy.describe().label,
         networkList: networkPolicy.rules.map((r) => r.raw),
         networkModes: Object.entries(NETWORK_MODES).map(([id, m]) => ({ id, ...m })),
-        proxy: proxyHandle ? { active: true, port: proxyHandle.port, stats: { ...proxyHandle.stats } } : { active: false },
+        proxy: proxyHandle
+          ? {
+              active: true,
+              port: proxyHandle.port,
+              // bwrap 的桥：沙箱里唯一能出去的通道
+              bridge: bridgeSocketPath ? { socket: bridgeSocketPath, bound: Boolean(proxyHandle.unixPath), port: BWRAP_BRIDGE_PORT } : null,
+              stats: { ...proxyHandle.stats },
+            }
+          : { active: false, bridge: null },
         // 隔离类型要如实展示：container / os / runtime / policy。
         isolation: isolationSummary({
           sandbox: { backend },
           runtimeJail: detectRuntimeJail(),
           backendReady: backend === 'local' ? true : backendAvailable[backend]?.() ?? false,
           controllerExposed: exposesController,
+          networkMode: networkPolicy.mode,
+          networkEnforced: Boolean(bridgeSocketPath) || networkPolicy.mode === 'off',
         }),
         // 控制器代码目录被划进可写范围时如实标记：这个边界保护不了 harness 自己。
         controller: {
@@ -585,73 +826,85 @@ export function createSandbox({
         auditCount: auditLog.length,
         presets: Object.entries(SCOPE_PRESETS).map(([id, p]) => ({ id, ...p })),
         modes: Object.entries(MODES).map(([id, m]) => ({ id, ...m })),
-        backends: [
-          {
-            id: 'windows',
-            label: 'Windows 原生沙箱',
-            available: backendAvailable.windows(),
-            note: '免安装：Restricted Token + ACL 强制写入边界，Job Object 管住进程树；读取权限沿用当前用户，网络规则为代理级',
-          },
-          { id: 'local', label: '本地策略沙箱', available: true, note: '路径作用域 + 命令扫描 + 环境变量清洗；不是内核隔离，可被绕过' },
-          {
-            id: 'docker',
-            label: 'Docker 容器',
-            available: backendAvailable.docker(),
-            note: '真正的文件系统/进程隔离，需要 docker 且守护进程在跑',
-          },
-          {
-            id: 'wsl',
-            label: 'WSL',
-            available: backendAvailable.wsl(),
-            note: '命令进入 WSL，但 Windows 磁盘与互操作通常仍可访问；不是完整容器边界',
-          },
-        ],
+        backends: backendCatalog(),
       };
     },
   };
 }
 
-/** 探测某个可执行文件是否存在（同步，够快） */
-export function probe(cmd) {
-  const exts = isWin ? (process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';') : [''];
-  const dirs = (process.env.PATH || '').split(path.delimiter);
-  for (const d of dirs) {
-    for (const ext of exts) {
-      try {
-        if (fs.existsSync(path.join(d, cmd + ext))) return true;
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-  return false;
-}
-
-const probeCache = new Map();
-
-/** 真正跑一下确认可用（docker 装了但守护进程没起、wsl 没装发行版都算不可用） */
-export function probeRunnable(cmd, args, timeoutMs = 4000) {
-  const key = `${cmd} ${args.join(' ')}`;
-  if (probeCache.has(key)) return probeCache.get(key);
-  let result = false;
-  if (probe(cmd)) {
-    try {
-      const r = spawnSync(cmd, args, { timeout: timeoutMs, stdio: 'ignore', windowsHide: true });
-      result = r.status === 0;
-    } catch {
-      result = false;
-    }
-  }
-  probeCache.set(key, result);
-  return result;
-}
+// probe / probeRunnable 已挪到 ./sandbox/probe.js（所有后端共用一套探测与缓存），
+// 文件顶部做了 re-export，旧的 import 不用改。
 
 export const backendAvailable = {
+  bwrap: () => bwrapAvailable(),
+  seatbelt: () => seatbeltAvailable(),
   windows: () => isWin && fs.existsSync(WINDOWS_RUNNER) && fs.existsSync(WINDOWS_SOURCE) && probe('powershell'),
   local: () => true,
   docker: () => probeRunnable('docker', ['info', '--format', '{{.ServerVersion}}']),
   wsl: () => probeRunnable('wsl.exe', ['-e', 'sh', '-c', 'exit 0']),
 };
+
+/**
+ * 后端清单：界面下拉框、GET /api/sandbox、describe() 共用这一份，避免不同地方说法不一致。
+ * available=false 的后端会被标成「未安装」并保持可选 —— 选中它只会失败关闭，不会静默降级。
+ */
+export function backendCatalog() {
+  const platform = process.platform;
+  const fallback = defaultBackend(platform);
+  const isDefault = (id) => fallback === id;
+  return [
+    {
+      id: 'bwrap',
+      label: 'bubblewrap 轻量沙箱',
+      available: backendAvailable.bwrap(),
+      default: isDefault('bwrap'),
+      platform: 'linux',
+      install: BWRAP_INSTALL_HINT,
+      note:
+        'Linux 推荐（Claude Code / Codex 同款）：内核 namespace + bind mount。整机只读、授权根可写、独立 PID/IPC/UTS ' +
+        'namespace；off 是真断网，白/黑名单走 unix socket 代理桥（需要 socat）。无 cgroup 配额。',
+    },
+    {
+      id: 'seatbelt',
+      label: 'macOS sandbox-exec',
+      available: backendAvailable.seatbelt(),
+      default: isDefault('seatbelt'),
+      platform: 'darwin',
+      install: 'macOS 系统自带；若被 SIP/企业策略禁用则无法启用',
+      note:
+        'macOS 推荐（Claude Code 同款 Seatbelt）：默认拒绝一切、读全域、写只给授权根目录、网络按策略整体开关。' +
+        'Seatbelt 无法按主机名过滤，所以不支持白/黑名单。',
+    },
+    {
+      id: 'windows',
+      label: 'Windows 原生沙箱',
+      available: backendAvailable.windows(),
+      default: isDefault('windows'),
+      platform: 'win32',
+      note: '免安装：Restricted Token + ACL 强制写入边界，Job Object 管住进程树；读取权限沿用当前用户，网络规则为代理级',
+    },
+    {
+      id: 'local',
+      label: '本地策略沙箱',
+      available: true,
+      note: '路径作用域 + 命令扫描 + 环境变量清洗；不是内核隔离，可被绕过。跨平台兜底，不建议在 Linux/macOS 上用它',
+    },
+    {
+      id: 'docker',
+      label: 'Docker 容器',
+      available: backendAvailable.docker(),
+      platform: 'any',
+      note: '可选的重方案：真正的文件系统/进程/cgroup 隔离，需要 docker 且守护进程在跑',
+    },
+    {
+      id: 'wsl',
+      label: 'WSL',
+      available: backendAvailable.wsl(),
+      platform: 'win32',
+      note: '命令进入 WSL，但 Windows 磁盘与互操作通常仍可访问；不是完整容器边界',
+    },
+  ];
+}
 
 /** 从环境变量读默认沙箱配置（多余空格容忍一下，配置写错不要等到执行时才炸） */
 export function sandboxDefaults(env = process.env) {
@@ -663,7 +916,8 @@ export function sandboxDefaults(env = process.env) {
   return {
     scope: text(env.SANDBOX_SCOPE) || 'workspace',
     mode: text(env.SANDBOX_MODE) || 'write',
-    backend: text(env.SANDBOX_BACKEND) || (isWin && !inJail ? 'windows' : 'local'),
+    // 平台默认：Linux = bubblewrap、macOS = sandbox-exec、Windows = 原生受限令牌
+    backend: text(env.SANDBOX_BACKEND) || (inJail ? 'local' : defaultBackend()),
     customRoots: (text(env.SANDBOX_ROOTS) || '').split(/[;\n]+/).map((r) => r.trim()).filter(Boolean),
     strict: text(env.SANDBOX_STRICT) !== '0',
     image: text(env.SANDBOX_IMAGE) || 'oven/bun:1.4.2-alpine',

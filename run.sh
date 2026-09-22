@@ -53,6 +53,29 @@ if [ "$USE_JAIL" = "1" ]; then
   exec node "$@"
 fi
 
+# ---- 默认沙箱后端提示（缺了会失败关闭，而不是静默降级）----
+if [ -z "${SANDBOX_BACKEND:-}" ]; then
+  case "$(uname -s)" in
+    Linux)
+      if command -v bwrap >/dev/null 2>&1 && bwrap --ro-bind / / --dev /dev --proc /proc -- /bin/true >/dev/null 2>&1; then
+        echo "[sandbox] bubblewrap 可用（默认后端 bwrap）"
+        command -v socat >/dev/null 2>&1 || echo "[sandbox] 没装 socat：网络白名单/黑名单会明确拒绝执行（all / off 不受影响）"
+      else
+        echo "[sandbox] bubblewrap 不可用：默认后端 bwrap 会失败关闭，不会退回 local。"
+        echo "          安装：sudo apt install bubblewrap（Debian/Ubuntu）/ sudo dnf install bubblewrap（Fedora）"
+        echo "          或者显式改用：SANDBOX_BACKEND=local ./run.sh ..."
+      fi
+      ;;
+    Darwin)
+      if command -v sandbox-exec >/dev/null 2>&1; then
+        echo "[sandbox] sandbox-exec 可用（默认后端 seatbelt）"
+      else
+        echo "[sandbox] 找不到 sandbox-exec：默认后端会失败关闭，可显式改用 SANDBOX_BACKEND=local"
+      fi
+      ;;
+  esac
+fi
+
 if [ -x "$BUN" ]; then
   echo "[runtime] 用项目自带的 Bun"
   exec "$BUN" "$HERE/server.js"

@@ -1,10 +1,12 @@
-// 沙箱专项测试：作用区域 / 权限 / 命令扫描 / 环境变量清洗 / 后端构造 / 审计 / HTTP / 界面。
+// 沙箱专项测试：作用区域 / 权限 / 命令扫描 / 环境变量清洗 / 后端构造（含 bwrap·Seatbelt 计划）/ 审计 / HTTP / 界面。
 // 用法: node scripts/sandbox-test.js [baseUrl]
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { createSandbox, SCOPE_PRESETS, probe } from '../src/sandbox.js';
+import { createSandbox, SCOPE_PRESETS, probe, defaultBackend } from '../src/sandbox.js';
+import { buildBwrapPlan, BWRAP_BRIDGE_PORT } from '../src/sandbox/bwrap.js';
+import { buildSeatbeltProfile, buildSeatbeltPlan } from '../src/sandbox/seatbelt.js';
 import { createToolRegistry } from '../src/tools/index.js';
 import { openPage } from './cdp.js';
 
@@ -109,7 +111,7 @@ section('[4] 环境变量清洗（不把密钥暴露给子进程）');
 }
 
 // ================= 5. 后端构造 =================
-section('[5] 执行后端（windows / local / docker / wsl）');
+section('[5] 执行后端（bubblewrap / seatbelt / windows / local / docker / wsl）');
 {
   const sb = createSandbox({ scope: 'workspace', workspace: WS });
   const local = sb.buildExec('node -v');
@@ -168,9 +170,73 @@ section('[5] 执行后端（windows / local / docker / wsl）');
   ok('wsl 后端把路径映射到 /mnt', wsl.file === 'wsl.exe' && wsl.args.join(' ').includes('/mnt/'));
 
   const cat = sb.describe();
-  ok('后端可用性被如实上报', cat.backends.length === 4 && cat.backends.some((b) => b.available), cat.backends.map((b) => `${b.id}:${b.available}`).join(' '));
+  ok('后端可用性被如实上报', cat.backends.length === 6 && cat.backends.some((b) => b.available), cat.backends.map((b) => `${b.id}:${b.available}`).join(' '));
+  ok('后端清单包含轻量原生后端', ['bwrap', 'seatbelt'].every((id) => cat.backends.some((b) => b.id === id)));
+  ok(
+    '平台默认后端：Linux=bwrap、macOS=seatbelt、Windows=windows',
+    defaultBackend('linux') === 'bwrap' && defaultBackend('darwin') === 'seatbelt' && defaultBackend('win32') === 'windows',
+  );
   ok('Windows 原生后端在 Windows 可用', process.platform !== 'win32' || cat.backends.find((b) => b.id === 'windows').available === true);
   ok('本地后端永远可用', cat.backends.find((b) => b.id === 'local').available === true);
+}
+
+// ================= 5b. 轻量原生后端（bubblewrap / Seatbelt 的计划构建）=================
+section('[5b] 轻量原生后端：bubblewrap（Linux）/ sandbox-exec（macOS）');
+{
+  const hasSeq = (args, ...seq) => args.some((_, i) => seq.every((s, j) => args[i + j] === s));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bwrap-plan-'));
+  const plan = buildBwrapPlan({
+    command: 'echo hi && cat /etc/hostname',
+    cwd: '/ws',
+    roots: ['/ws', '/data'],
+    mode: 'write',
+    network: 'whitelist',
+    bridge: { socketPath: '/run/user/1000/mini-harness-net/x.sock', port: BWRAP_BRIDGE_PORT },
+    tmpDir: tmp,
+    pidsLimit: 256,
+    capabilities: { newSession: true, unshareCgroupTry: true },
+  });
+  ok(
+    'bwrap：整机只读 + 只写授权根',
+    hasSeq(plan.args, '--ro-bind', '/', '/') && hasSeq(plan.args, '--bind', '/ws', '/ws') && hasSeq(plan.args, '--bind', '/data', '/data'),
+  );
+  ok(
+    'bwrap：独立 PID/IPC/UTS namespace + 父死子亡',
+    ['--unshare-pid', '--unshare-uts', '--unshare-ipc', '--die-with-parent', '--new-session'].every((x) => plan.args.includes(x)),
+  );
+  ok('bwrap：/tmp 换成私有目录', hasSeq(plan.args, '--bind', tmp, '/tmp'));
+  ok(
+    'bwrap：白名单断网并只暴露代理桥',
+    plan.args.includes('--unshare-net') && hasSeq(plan.args, '--ro-bind', '/run/user/1000/mini-harness-net/x.sock', '/run/user/1000/mini-harness-net/x.sock'),
+  );
+  ok(
+    'bwrap：socat 桥 + ulimit 兜底 + argv 传命令',
+    plan.args.some((a) => a.includes('socat TCP-LISTEN:3128')) &&
+      plan.args.some((a) => a.includes('ulimit -u 256')) &&
+      plan.args.at(-1) === 'echo hi && cat /etc/hostname' &&
+      plan.args.at(-2) === 'harness-sh',
+  );
+  const roPlan = buildBwrapPlan({ command: 'ls', cwd: '/ws', roots: ['/ws'], mode: 'readonly', network: 'off' });
+  ok('bwrap：只读模式没有任何可写 bind', !roPlan.args.includes('--bind'));
+  ok('bwrap：off 模式真断网', roPlan.args.includes('--unshare-net'));
+
+  const profile = buildSeatbeltProfile({ writable: ['/ws'], tmpPaths: ['/tmp'], network: 'all' });
+  ok(
+    'seatbelt：默认拒绝、读全域、写白名单',
+    profile.includes('(deny default)') &&
+      profile.includes('(allow file-read*)') &&
+      profile.includes('(allow file-write* (subpath "/ws") (subpath "/tmp"))'),
+  );
+  ok('seatbelt：路径里的引号会被转义', buildSeatbeltProfile({ writable: ['/a"b'] }).includes('(subpath "/a\\"b")'));
+  ok(
+    'seatbelt：off 不放行网络 / all 放行网络',
+    !buildSeatbeltProfile({ writable: [], network: 'off' }).includes('(allow network*)') && profile.includes('(allow network*)'),
+  );
+  const sPlan = buildSeatbeltPlan({ command: 'ls', cwd: '/ws', roots: ['/ws'], mode: 'readonly', network: 'off' });
+  ok(
+    'seatbelt：sandbox-exec -p 执行，只读模式不给写白名单',
+    sPlan.file === 'sandbox-exec' && sPlan.args[0] === '-p' && sPlan.args.includes('-c') && !sPlan.args[1].includes('(subpath "/ws")'),
+  );
 }
 
 // ================= 6. 审计 =================
@@ -227,7 +293,7 @@ let createdSessionId = null;
 section('[8] HTTP 与界面');
 {
   const cat = await (await fetch(`${BASE}/api/sandbox`)).json();
-  ok('GET /api/sandbox 返回目录', cat.presets.length === 4 && cat.backends.length === 4, cat.presets.map((p) => p.id).join(','));
+  ok('GET /api/sandbox 返回目录', cat.presets.length === 4 && cat.backends.length === 6, cat.presets.map((p) => p.id).join(','));
   ok('返回默认配置与工作区', Boolean(cat.defaults && cat.workspace));
 
   const t = await (await fetch(`${BASE}/api/sandbox/test`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: 'workspace', mode: 'readonly' }) })).json();
@@ -282,7 +348,7 @@ section('[8] HTTP 与界面');
     );
     ok('界面有 4 种作用区域可选', ui.scopes === 4);
     ok('界面有 2 种权限可选', ui.modes === 2);
-    ok('界面列出 4 种后端并标注不可用', ui.backends.length === 4 && ui.backends.find((b) => b.v === 'local').off === false, JSON.stringify(ui.backends));
+    ok('界面列出 6 种后端并标注不可用', ui.backends.length === 6 && ui.backends.find((b) => b.v === 'local').off === false, JSON.stringify(ui.backends));
     ok('输入区显示沙箱徽标', /🔒/.test(ui.badge), ui.badge);
     ok('预览显示实际根目录', ui.preview.includes('作用区域'), ui.preview.replace(/\s+/g, ' ').slice(0, 60));
 

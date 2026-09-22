@@ -89,7 +89,7 @@ const runtime = findNodeRuntime();
 if (!runtime) {
   console.error('✗ 找不到 Node 运行时，无法启用权限模型。');
   console.error('  Node 的 --permission 是这套真隔离的实现基础，Bun 不支持它。');
-  console.error('  装一个 Node（≥20）再来，或者改用 docker / wsl 沙箱后端。');
+  console.error('  装一个 Node（≥20）再来，或者改用平台原生沙箱后端（bwrap / seatbelt / windows）。');
   process.exit(2);
 }
 
