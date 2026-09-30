@@ -70,6 +70,7 @@
       workflow_start: () => `${ev.name} · ${(ev.phases || []).join(' → ')}`,
       workflow_phase: () => `${ev.index}/${ev.total} ${ev.phase}`,
       workflow_step_start: () => `${ev.phase} · ${ev.label}`,
+      workflow_step_delta: () => `${ev.label || ''} ${cut(ev.text, 100)}`.trim(),
       workflow_step_done: () => `${ev.phase} · ${ev.label} ${ev.ok === false ? '失败' : '完成'}`,
       workflow_done: () => `${ev.name} · ${ev.ok}/${ev.steps} 步 · ${ev.ms}ms`,
       usage: () => `${ev.usage?.prompt_tokens ?? '?'} in / ${ev.usage?.completion_tokens ?? '?'} out`,

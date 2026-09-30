@@ -82,7 +82,10 @@ export function createWorkflowEngine({ dir, agents, config }) {
                 signal,
                 emit,
                 sandbox,
-                onDelta: (d) => emit?.({ type: 'workflow_step_delta', label, ...d }),
+                // 展开顺序很重要：d 里也带 type（是 assistant_delta / reasoning_delta），
+                // 必须把 type 写在最后，否则 workflow_step_delta 会被 d.type 覆盖，
+                // 这一步的流式输出就会被当成「主对话的正文」混进父 trace。
+                onDelta: (d) => emit?.({ label, ...d, type: 'workflow_step_delta' }),
               });
               emit?.({
                 type: 'workflow_step_done',

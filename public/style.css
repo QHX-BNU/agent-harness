@@ -549,6 +549,7 @@ code.inline {
 .agent-card .body { color: var(--dim); font-size: 12px; margin-top: 5px; }
 .wf-steps { margin: 8px 0 0; padding-left: 18px; color: var(--dim); font-size: 12px; }
 .wf-steps .phase { color: var(--text-2); font-weight: 500; }
+.wf-steps .step-out { color: var(--dim-2); opacity: .8; }
 
 /* 运行中的三点动画 */
 .typing { display: inline-flex; gap: 4px; align-items: center; padding: 4px 2px; }

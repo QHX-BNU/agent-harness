@@ -68,6 +68,9 @@ function format(ev) {
       return `${c.dim}  阶段 ${ev.index}/${ev.total}: ${ev.phase}${c.reset}`;
     case 'workflow_step_start':
       return `${c.dim}    · ${ev.label} 开始${c.reset}`;
+    case 'workflow_step_delta':
+      // 属于某个 step 的输出，用暗色和主对话的正文区分开
+      return `${c.dim}${ev.text}${c.reset}`;
     case 'workflow_step_done':
       return `${ev.ok === false ? c.red : c.green}    · ${ev.label} 结束${c.reset}${c.dim} ${ev.steps ?? ''} 步${c.reset}`;
     case 'workflow_done':

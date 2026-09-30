@@ -54,6 +54,8 @@ export function summarizeEvent(ev) {
       return `${ev.index}/${ev.total} ${ev.phase}`;
     case 'workflow_step_start':
       return `${ev.phase} · ${ev.label}`;
+    case 'workflow_step_delta':
+      return `${ev.label || ''} ${cut(ev.text, 100)}`.trim();
     case 'workflow_step_done':
       return `${ev.phase} · ${ev.label} ${ev.ok === false ? '失败' : '完成'}`;
     case 'workflow_done':

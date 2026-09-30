@@ -916,6 +916,10 @@
         card.querySelector('.name').textContent = ev.name;
         els.messages.append(card);
         state.wfCard = card;
+        // 每个 label 对应卡片里的一行：同一阶段内的多个 step 是并行跑的，
+        // 不能只记「最后一个」，否则并行输出会串行落到同一行上。
+        state.wfSteps = new Map();
+        state.wfText = new Map();
         scrollDown();
         break;
       }
@@ -925,10 +929,27 @@
         scrollDown();
         break;
 
-      case 'workflow_step_start':
-        state.wfCard?.querySelector('.wf-steps').append(el('li', 'step', `· ${ev.label} 运行中…`));
+      case 'workflow_step_start': {
+        const li = el('li', 'step', `· ${ev.label} 运行中…`);
+        state.wfCard?.querySelector('.wf-steps').append(li);
+        state.wfSteps?.set(ev.label, li);
         scrollDown();
         break;
+      }
+
+      // 某个 step 自己的流式输出：它属于那一步，不属于主对话。
+      // 所以渲染进卡片对应的那一行，绝不能落进 assistant_delta 的气泡里。
+      case 'workflow_step_delta': {
+        const li = state.wfSteps?.get(ev.label);
+        if (!li) break;
+        const raw = (state.wfText.get(ev.label) || '') + (ev.text || '');
+        state.wfText.set(ev.label, raw);
+        let out = li.querySelector('.step-out');
+        if (!out) { out = el('span', 'step-out'); li.append(out); }
+        out.textContent = ` ${raw.replace(/\s+/g, ' ').slice(-100)}`;
+        scrollDown();
+        break;
+      }
 
       case 'workflow_step_done': {
         if (!state.wfCard) break;
