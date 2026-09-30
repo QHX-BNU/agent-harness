@@ -1,0 +1,785 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mini-harness · 项目介绍</title>
+<style>
+  :root {
+    --bg: #080d1c;
+    --bg2: #101a33;
+    --card: rgba(255, 255, 255, 0.045);
+    --card2: rgba(255, 255, 255, 0.075);
+    --line: rgba(255, 255, 255, 0.11);
+    --fg: #e9eefb;
+    --muted: #94a6c8;
+    --accent: #4dd7c8;
+    --accent2: #8f7cf8;
+    --warn: #f3c24f;
+    --bad: #ff7d7d;
+    --ok: #5ddc8f;
+    --grid: rgba(255, 255, 255, 0.035);
+    --shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+  }
+  body.light {
+    --bg: #eef2fa;
+    --bg2: #ffffff;
+    --card: #ffffff;
+    --card2: #f5f8ff;
+    --line: #d9e2f1;
+    --fg: #16203a;
+    --muted: #5d6d8a;
+    --accent: #0d9488;
+    --accent2: #6d5ae6;
+    --warn: #b7791f;
+    --bad: #cc3340;
+    --ok: #1f9d55;
+    --grid: rgba(20, 40, 80, 0.05);
+    --shadow: 0 18px 50px rgba(30, 50, 90, 0.14);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background:
+      radial-gradient(1200px 700px at 12% -10%, color-mix(in srgb, var(--accent2) 16%, transparent), transparent 60%),
+      radial-gradient(1000px 620px at 100% 110%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 62%),
+      linear-gradient(160deg, var(--bg), var(--bg2));
+    color: var(--fg);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 48px 48px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  #stage {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 1280px;
+    height: 720px;
+    transform-origin: center center;
+    z-index: 1;
+  }
+
+  .slide {
+    position: absolute;
+    inset: 0;
+    padding: 54px 64px 58px;
+    display: flex;
+    flex-direction: column;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(14px) scale(0.995);
+    transition: opacity 0.35s ease, transform 0.35s cubic-bezier(0.22, 0.7, 0.3, 1);
+  }
+  .slide.active {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+  .slide.active .anim {
+    animation: rise 0.5s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+  }
+  .slide.active .anim:nth-child(2) { animation-delay: 0.06s; }
+  .slide.active .anim:nth-child(3) { animation-delay: 0.12s; }
+  .slide.active .anim:nth-child(4) { animation-delay: 0.18s; }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  /* ---------- 通用排版 ---------- */
+  .kicker {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .kicker::before {
+    content: "";
+    width: 22px;
+    height: 2px;
+    border-radius: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+  }
+  h2.h {
+    margin: 12px 0 6px;
+    font-size: 38px;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+  }
+  h2.h small {
+    display: block;
+    margin-top: 10px;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--muted);
+    letter-spacing: 0;
+  }
+  .body { flex: 1; min-height: 0; margin-top: 24px; display: flex; flex-direction: column; gap: 18px; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 18px 20px;
+    box-shadow: var(--shadow);
+  }
+  .card h3 {
+    margin: 0 0 8px;
+    font-size: 17px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+  }
+  .card p { margin: 0; font-size: 14px; line-height: 1.62; color: var(--muted); }
+  .card .ico { font-size: 18px; }
+  .card.tint { background: linear-gradient(150deg, color-mix(in srgb, var(--accent) 10%, var(--card)), var(--card)); }
+  .card.tint2 { background: linear-gradient(150deg, color-mix(in srgb, var(--accent2) 12%, var(--card)), var(--card)); }
+
+  .list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 9px; }
+  .list li {
+    position: relative;
+    padding-left: 20px;
+    font-size: 14.5px;
+    line-height: 1.55;
+    color: var(--fg);
+  }
+  .list li::before {
+    content: "";
+    position: absolute;
+    left: 2px;
+    top: 8px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+  }
+  .list li span.dim { color: var(--muted); }
+
+  code, .mono { font-family: ui-monospace, "Cascadia Code", Consolas, "SF Mono", Menlo, monospace; }
+  code {
+    font-size: 0.92em;
+    padding: 1px 6px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: color-mix(in srgb, var(--accent) 82%, var(--fg));
+    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .code {
+    background: color-mix(in srgb, #000 26%, var(--card2));
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px 18px;
+    font-size: 13.5px;
+    line-height: 1.75;
+    color: var(--fg);
+    white-space: pre;
+    overflow: hidden;
+  }
+  body.light .code { background: #0f172a; color: #e6edf7; border-color: #1e2b45; }
+  .code .c { color: #7c8db3; }
+  .code .k { color: #6ee7d7; }
+  .code .s { color: #f0c674; }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--card);
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .pill.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+  .chips { display: flex; flex-wrap: wrap; gap: 10px; }
+
+  .stat { text-align: center; padding: 14px 10px; }
+  .stat b {
+    display: block;
+    font-size: 34px;
+    letter-spacing: -0.02em;
+    background: linear-gradient(120deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .stat span { font-size: 12.5px; color: var(--muted); }
+
+  .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; flex: 1; min-height: 0; }
+  .shot {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--card);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .shot img { width: 100%; height: 100%; object-fit: cover; object-position: top left; opacity: 0.96; }
+  .shot figcaption {
+    padding: 7px 12px;
+    font-size: 12.5px;
+    color: var(--muted);
+    border-top: 1px solid var(--line);
+    background: color-mix(in srgb, var(--bg2) 60%, transparent);
+  }
+
+  /* ---------- 封面 ---------- */
+  .cover { justify-content: center; }
+  .cover .title {
+    margin: 18px 0 6px;
+    font-size: 92px;
+    line-height: 1;
+    letter-spacing: -0.03em;
+    background: linear-gradient(115deg, var(--fg) 20%, var(--accent) 60%, var(--accent2) 95%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .cover .subtitle { margin: 0; font-size: 26px; font-weight: 650; }
+  .cover .lede { margin: 14px 0 26px; font-size: 16px; color: var(--muted); max-width: 820px; line-height: 1.7; }
+  .hint { margin-top: auto; font-size: 12.5px; color: var(--muted); opacity: 0.85; }
+  .cover .hint { margin-top: 34px; }
+
+  /* ---------- 架构图 ---------- */
+  .arch { display: flex; flex-direction: column; gap: 8px; flex: 1; justify-content: center; }
+  .layer {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 12px 18px;
+    background: var(--card);
+  }
+  .layer .tag2 {
+    flex: 0 0 168px;
+    font-weight: 700;
+    font-size: 14.5px;
+  }
+  .layer .desc { font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+  .layer.l1 { background: linear-gradient(90deg, color-mix(in srgb, var(--accent2) 14%, var(--card)), var(--card)); }
+  .layer.l2 { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, var(--card)), var(--card)); }
+  .layer.l3 { background: linear-gradient(90deg, color-mix(in srgb, var(--warn) 10%, var(--card)), var(--card)); }
+  .layer.l4 { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 8%, var(--card)), var(--card)); }
+  .flow { text-align: center; font-size: 12px; color: var(--muted); letter-spacing: 0.08em; }
+
+  .split { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 20px; flex: 1; min-height: 0; }
+  .split .shot img { object-fit: contain; }
+
+  .kv { display: grid; grid-template-columns: 128px 1fr; gap: 8px 14px; font-size: 14px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; }
+
+  /* ---------- HUD ---------- */
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+  #brand {
+    position: absolute;
+    top: 22px;
+    left: 28px;
+    font-size: 12.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 700;
+  }
+  #page {
+    position: absolute;
+    right: 28px;
+    bottom: 20px;
+    font-size: 12.5px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  #page b { color: var(--fg); font-size: 15px; }
+  #bar-wrap { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: color-mix(in srgb, var(--fg) 8%, transparent); }
+  #bar { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width 0.3s ease; }
+  #navprev, #navnext { position: absolute; top: 0; bottom: 0; width: 14%; pointer-events: auto; cursor: pointer; }
+  #navprev { left: 0; }
+  #navnext { right: 0; }
+  #navprev:hover, #navnext:hover { background: linear-gradient(90deg, color-mix(in srgb, var(--fg) 5%, transparent), transparent); }
+  #navnext:hover { background: linear-gradient(270deg, color-mix(in srgb, var(--fg) 5%, transparent), transparent); }
+
+  @media print {
+    @page { size: 1280px 720px; margin: 0; }
+    body { background: #fff; overflow: visible; }
+    body::before { display: none; }
+    #hud { display: none; }
+    #stage { position: static; transform: none !important; width: auto; height: auto; }
+    .slide {
+      position: relative;
+      opacity: 1 !important;
+      transform: none !important;
+      page-break-after: always;
+      break-after: page;
+      height: 720px;
+      border-bottom: 1px solid #ddd;
+    }
+  }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="brand">mini-harness</div>
+  <div id="navprev" title="上一页"></div>
+  <div id="navnext" title="下一页"></div>
+  <div id="page"><b id="pageNow">01</b> / <span id="pageTotal">14</span></div>
+  <div id="bar-wrap"><div id="bar"></div></div>
+</div>
+
+<div id="stage">
+
+  <!-- ================= 1. 封面 ================= -->
+  <section class="slide cover">
+    <div class="kicker">零第三方依赖 · Node 18+ · 自带前端</div>
+    <h1 class="title">mini-harness</h1>
+    <p class="subtitle">一个完整可用的 agent harness</p>
+    <p class="lede">
+      模型接入 · 控制循环 · 工具生态 · 长期记忆 · 子代理 · 工作流 · 真沙箱 · 可观测性<br />
+      不是 demo —— 每一层都真的能跑。
+    </p>
+    <div class="chips">
+      <span class="pill on">🛡 三平台原生沙箱</span>
+      <span class="pill">🧠 分层记忆 + 常驻画像</span>
+      <span class="pill">🛠 26 个内置工具</span>
+      <span class="pill">📡 35+ SSE 事件</span>
+      <span class="pill">🗂 可恢复 · 可回放</span>
+    </div>
+    <div class="hint">→ / 空格 下一页　← 上一页　F 全屏　T 切换主题　Ctrl+P 导出 PDF</div>
+  </section>
+
+  <!-- ================= 2. 它是什么 ================= -->
+  <section class="slide">
+    <div class="kicker">概览</div>
+    <h2 class="h">它是什么<small>把「一个 agent 从问一句话到跑完任务」需要的每一层都做出来</small></h2>
+    <div class="body">
+      <div class="grid2">
+        <div class="card tint anim">
+          <h3><span class="ico">🧭</span>不是 demo</h3>
+          <p>状态机、长期记忆、工具生态、子代理、工作流、沙箱、可观测性都是真能跑的；有 20+ 个真跑测试脚本兜底。</p>
+        </div>
+        <div class="card tint2 anim">
+          <h3><span class="ico">📦</span>零第三方依赖</h3>
+          <p>只用 Node 内建模块：自己写的 Markdown 解析器、零依赖 zip 读写、无框架前端，<code>node server.js</code> 直接跑。</p>
+        </div>
+        <div class="card anim">
+          <h3><span class="ico">⚡</span>开箱即用</h3>
+          <p>启动脚本自动挑运行时（自带 Bun → 系统 Node → 系统 Bun → 自动下载），不用 npm install，不用 Docker。</p>
+        </div>
+        <div class="card anim">
+          <h3><span class="ico">🔌</span>离线可玩，接真模型也简单</h3>
+          <p>默认 mock 模型就能看到完整链路；填一个 API key（15 家厂商预设）或指向本地 Ollama / vLLM 即可接真实模型。</p>
+        </div>
+      </div>
+      <div class="grid4">
+        <div class="stat card"><b>26</b><span>内置工具（8 类）</span></div>
+        <div class="stat card"><b>15</b><span>模型厂商预设</span></div>
+        <div class="stat card"><b>35+</b><span>SSE 事件类型</span></div>
+        <div class="stat card"><b>40+</b><span>REST 端点</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 3. 启动 ================= -->
+  <section class="slide">
+    <div class="kicker">快速开始</div>
+    <h2 class="h">一条命令跑起来<small>不需要 Node、不需要 Bun、不需要 Docker、不需要 npm install</small></h2>
+    <div class="body">
+      <div class="grid2" style="align-items: start">
+        <div class="code anim"><span class="c"># Windows</span>
+run.cmd D:\my-project
+
+<span class="c"># Linux / macOS</span>
+./run.sh ~/my-project
+
+<span class="c"># 默认 http://127.0.0.1:5175</span>
+<span class="c"># 不配 key 就是离线 mock，点一下就能看完整链路</span></div>
+        <div class="card anim">
+          <h3><span class="ico">🚀</span>运行时优先级</h3>
+          <ul class="list">
+            <li>项目自带 <code>runtime/bin/bun</code><span class="dim">（打包分发时带上）</span></li>
+            <li>系统里的 <code>node</code><span class="dim">（已装就用它，零下载）</span></li>
+            <li>系统里的 <code>bun</code></li>
+            <li>都没有 → 下载一次 Bun 到 <code>runtime/</code><span class="dim">（约 30 MB，之后不再下载）</span></li>
+          </ul>
+        </div>
+      </div>
+      <div class="code anim"><span class="c"># 接真实模型（任意一家兼容 openai / anthropic 协议的都行）</span>
+<span class="k">$env:PROVIDER</span>=<span class="s">"deepseek"</span>; <span class="k">$env:API_KEY</span>=<span class="s">"sk-..."</span>; node server.js
+<span class="c"># 或指向本地：PROVIDER=custom BASE_URL=http://127.0.0.1:11434/v1 MODEL=qwen2.5</span></div>
+    </div>
+  </section>
+
+  <!-- ================= 4. 架构 ================= -->
+  <section class="slide">
+    <div class="kicker">架构</div>
+    <h2 class="h">四层，各管一件事<small>前端只吃 SSE 事件流；内核不依赖具体厂商；所有状态落盘可恢复</small></h2>
+    <div class="body">
+      <div class="arch">
+        <div class="layer l1 anim">
+          <div class="tag2">前端 <code>public/</code></div>
+          <div class="desc">会话栏 · 对话流 + 工具/审批/工作流卡片 · 状态与 Trace 面板 · 设置面板（零框架，原生 DOM + 自研 Markdown 渲染）</div>
+        </div>
+        <div class="flow">↓ SSE 事件流　　↑ REST</div>
+        <div class="layer l2 anim">
+          <div class="tag2">服务 <code>server.js</code></div>
+          <div class="desc">40+ REST 端点 + 3 条 SSE 流：对话 / 工作流 / 会话事件；静态资源与导出下载（trace、会话、技能 zip）</div>
+        </div>
+        <div class="flow">↓</div>
+        <div class="layer l3 anim">
+          <div class="tag2">内核 <code>src/</code></div>
+          <div class="desc">loop 控制循环 · state 状态机 · policy 策略+审批 · memory 记忆 · tools 注册表 · agents 子代理 · workflow 引擎 · sandbox 沙箱 · store 持久化</div>
+        </div>
+        <div class="flow">↓</div>
+        <div class="layer l4 anim">
+          <div class="tag2">模型端口 <code>src/providers/</code></div>
+          <div class="desc">15 家厂商预设 · 3 种协议（openai / anthropic / mock）· 超时与指数退避重试 · 错误归一化 · 自检与模型列表</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 5. 控制循环 ================= -->
+  <section class="slide">
+    <div class="kicker">内核</div>
+    <h2 class="h">控制循环：模型 → 工具 → 模型<small>一个会话是一个状态机，不是一条裸消息数组</small></h2>
+    <div class="body">
+      <div class="grid2" style="align-items: start">
+        <div class="card anim">
+          <h3><span class="ico">🔁</span>循环里做的事</h3>
+          <ul class="list">
+            <li>步数预算、并发 / 串行工具执行</li>
+            <li>工具调用前后都过策略层与审批</li>
+            <li>审批挂起时状态变 <code>awaiting_approval</code></li>
+            <li>随时中止（abort），并落 trace</li>
+            <li>超长工具结果落盘，按 turn 裁剪历史</li>
+          </ul>
+        </div>
+        <div class="card anim">
+          <h3><span class="ico">🚦</span>状态机</h3>
+          <div class="chips" style="margin-bottom: 12px">
+            <span class="pill on">idle</span>
+            <span class="pill on">running</span>
+            <span class="pill">awaiting_approval</span>
+            <span class="pill">aborted</span>
+            <span class="pill">error</span>
+          </div>
+          <p>轮次步数、token 与成本聚合挂在状态上；会话存在磁盘上，重启不丢，可以恢复、可以回放。</p>
+        </div>
+      </div>
+      <div class="grid3">
+        <div class="card anim"><h3>✅ allow</h3><p>读文件、搜索这类安全操作直接放行。</p></div>
+        <div class="card anim"><h3>⏳ ask</h3><p>写文件、执行命令弹审批按钮；超时等于拒绝。</p></div>
+        <div class="card anim"><h3>⛔ deny</h3><p>危险命令硬拦：<code>rm -rf /</code>、<code>mkfs</code>、改注册表等。</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 6. 工具 ================= -->
+  <section class="slide">
+    <div class="kicker">能力</div>
+    <h2 class="h">工具生态：8 类 26 个内置工具<small>统一的注册表 + 开关 + 错误归一化，模型看到的就是真实可用的那张表</small></h2>
+    <div class="body">
+      <div class="grid4">
+        <div class="card anim"><h3><span class="ico">📂</span>文件</h3><p>read / write / edit / list / glob / grep…</p></div>
+        <div class="card anim"><h3><span class="ico">💻</span>执行</h3><p>run_shell：作业目录、超时、进程树收拢，必须过沙箱</p></div>
+        <div class="card anim"><h3><span class="ico">🧠</span>记忆</h3><p>memory add / edit / delete / search / stats</p></div>
+        <div class="card anim"><h3><span class="ico">🤖</span>子代理</h3><p>agent_run / agent_save / agent_list / agent_delete</p></div>
+        <div class="card anim"><h3><span class="ico">🧩</span>技能</h3><p>技能包安装 / 生成 / 导出 / 按需加载</p></div>
+        <div class="card anim"><h3><span class="ico">🗺</span>计划</h3><p>todo_write 让模型维护可勾选的任务清单</p></div>
+        <div class="card anim"><h3><span class="ico">🧾</span>工作流</h3><p>把多阶段任务交给 workflow 引擎跑</p></div>
+        <div class="card anim"><h3><span class="ico">📦</span>产物</h3><p>产物落盘 + 会话内可下载</p></div>
+      </div>
+      <div class="card tint anim">
+        <p>工具可以随时启停：关掉就立刻从模型的工具表里消失（省 token，也意味着更小的攻击面）。每个工具都拿到统一的 <code>ctx</code>（会话 / 工作区 / 沙箱 / 事件发射器），错误一律归一化成结构化结果，而不是抛异常。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 7. 记忆 ================= -->
+  <section class="slide">
+    <div class="kicker">长期记忆</div>
+    <h2 class="h">记住你，但别把上下文塞爆<small>三块常驻画像 + 三层结构化记忆 + 每轮按预算召回</small></h2>
+    <div class="body">
+      <div class="grid3">
+        <div class="card tint anim"><h3><span class="ico">👤</span>user.md</h3><p>你是谁、在做什么、技术偏好。</p></div>
+        <div class="card tint2 anim"><h3><span class="ico">🫀</span>soul.md</h3><p>协作方式与「应该怎么做事」的立场。</p></div>
+        <div class="card anim"><h3><span class="ico">⚙️</span>preference.md</h3><p>可执行偏好：回复语言、要不要展示图片……</p></div>
+      </div>
+      <div class="grid2" style="align-items: start">
+        <div class="card anim">
+          <h3><span class="ico">🗂</span>结构化分层</h3>
+          <ul class="list">
+            <li><code>global</code>：所有会话可见的长期事实</li>
+            <li><code>workspace</code>：只在这个工作区生效</li>
+            <li><code>session</code>：本会话的临时上下文</li>
+          </ul>
+        </div>
+        <div class="card anim">
+          <h3><span class="ico">🔍</span>检索与召回</h3>
+          <ul class="list">
+            <li>词元重叠 + 重要度 + 时效打分（零依赖，不建向量库）</li>
+            <li>每轮自动召回 top-K，按字符预算截断注入</li>
+            <li>记忆加载有统计：这次对话到底用了哪几条，看得见</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 8. 沙箱 ================= -->
+  <section class="slide">
+    <div class="kicker">安全边界</div>
+    <h2 class="h">沙箱：三平台原生轻量边界<small>和 Claude Code / Codex 同款思路 —— 不拉容器、不要 root、不要守护进程</small></h2>
+    <div class="body">
+      <div class="split">
+        <div style="display: flex; flex-direction: column; gap: 12px">
+          <div class="grid3">
+            <div class="card anim"><h3><span class="ico">🐧</span>Linux</h3><p><code>bwrap</code>：整机只读 + 授权根可写，独立 PID/IPC/UTS namespace</p></div>
+            <div class="card anim"><h3><span class="ico">🍎</span>macOS</h3><p><code>sandbox-exec</code>（Seatbelt）：deny default，读全域写白名单</p></div>
+            <div class="card anim"><h3><span class="ico">🪟</span>Windows</h3><p>受限令牌 + capability SID ACL + Job Object</p></div>
+          </div>
+          <div class="card tint anim">
+            <h3><span class="ico">🌐</span>网络：三种强制力，绝不假装</h3>
+            <p style="margin-bottom: 8px">
+              <b>内核断网</b>（bwrap <code>--unshare-net</code> / Seatbelt / Docker <code>network none</code>）— 绕不过；
+              <b>强制代理桥</b>（bwrap 白/黑名单：沙箱里只有一个 unix socket 出口）— 绕不过；
+              <b>合作式代理</b>（windows / wsl / local）— 会被直连绕过，界面里如实标注。
+            </p>
+            <p>组件缺失或内核不支持时 <b>失败关闭</b>：直接拒绝执行，绝不静默回落到策略层。</p>
+          </div>
+        </div>
+        <figure class="shot anim">
+          <img src="img/ui-sandbox.png" alt="沙箱设置面板" />
+          <figcaption>设置 → 沙箱：作用区域、权限、执行后端、网络模式与自测规则</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 9. 子代理与工作流 ================= -->
+  <section class="slide">
+    <div class="kicker">扩展</div>
+    <h2 class="h">子代理与工作流<small>把「一个大任务」拆成可并行、可追溯的小任务</small></h2>
+    <div class="body">
+      <div class="grid2" style="align-items: start">
+        <div class="card tint anim">
+          <h3><span class="ico">🤖</span>子代理（subagent）</h3>
+          <ul class="list">
+            <li>独立上下文，不污染主对话</li>
+            <li>并发上限 + 递归深度限制</li>
+            <li>模板可复用：职责、系统提示、模型路由、token 上限</li>
+            <li>请求级凭证继承，子代理也能用同一把 key</li>
+            <li>嵌套 trace：谁派了谁、花了多少步，全都能看见</li>
+          </ul>
+        </div>
+        <div class="card tint2 anim">
+          <h3><span class="ico">🧾</span>工作流（workflow）</h3>
+          <ul class="list">
+            <li>JSON 定义：阶段串行、阶段内步骤并行</li>
+            <li>模板变量：<code>{{input}}</code> / <code>{{prev}}</code> / <code>{{steps.x}}</code></li>
+            <li>每个步骤独立上下文，结果自动回灌下一阶段</li>
+            <li>整体走 SSE 流式推进，前端实时看进度</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card anim">
+        <p>典型用法：研究型任务先并行侦察、再汇总成报告；重构任务先并行扫描多个模块、再统一改。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 10. 可观测性 ================= -->
+  <section class="slide">
+    <div class="kicker">可观测性</div>
+    <h2 class="h">每一次调用都留痕<small>会话可恢复、事件可回放、trace 可导出</small></h2>
+    <div class="body">
+      <div class="grid3">
+        <div class="card anim"><h3><span class="ico">📡</span>35+ 事件类型</h3><p>模型增量、工具调用与结果、审批、记忆召回、子代理、工作流、用量与错误……同时喂 SSE 和终端日志。</p></div>
+        <div class="card anim"><h3><span class="ico">🧵</span>Trace 三种导出</h3><p>事件摘要 + 分组 + JSONL / JSON 快照 / Markdown，界面上可以全屏看，也可以下载成附件。</p></div>
+        <div class="card anim"><h3><span class="ico">🗄</span>会话可恢复</h3><p>会话 JSON + 事件 JSONL + 产物文件；支持回收站、备份导出、中止后恢复。</p></div>
+      </div>
+      <div class="grid2" style="align-items: start">
+        <div class="card tint anim"><h3><span class="ico">💰</span>用量与成本</h3><p>每次请求的 token、耗时、重试次数都记录在会话状态里，可以按会话聚合。</p></div>
+        <div class="card tint2 anim"><h3><span class="ico">🔎</span>看得见「被拦住」</h3><p>越权、危险命令、网络拒绝都会变成界面提示与 trace 事件，而不是静默失败。</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 11. 界面画廊 ================= -->
+  <section class="slide">
+    <div class="kicker">界面</div>
+    <h2 class="h">自带前端，不是 API 演示<small>三栏布局 · 流式渲染 · 工具卡片 · 审批按钮 · Trace 面板 · 设置弹窗</small></h2>
+    <div class="shots">
+      <figure class="shot anim"><img src="img/ui-done.png" alt="对话与工具调用" /><figcaption>对话 · 工具调用 · 审批</figcaption></figure>
+      <figure class="shot anim"><img src="img/ui-trace.png" alt="Trace 全屏" /><figcaption>Trace 全屏 · 事件分组 · 三种格式导出</figcaption></figure>
+      <figure class="shot anim"><img src="img/ui-agent.png" alt="子代理执行" /><figcaption>子代理执行过程（嵌套 trace）</figcaption></figure>
+      <figure class="shot anim"><img src="img/ui-memory.png" alt="记忆分块" /><figcaption>记忆 · 三块常驻画像 + 分块统计</figcaption></figure>
+    </div>
+  </section>
+
+  <!-- ================= 12. 测试与质量 ================= -->
+  <section class="slide">
+    <div class="kicker">质量</div>
+    <h2 class="h">九层测试，全部真跑<small>没有快照作弊：真的起服务、真的调工具、真的越界一次看挡不挡得住</small></h2>
+    <div class="body">
+      <div class="grid3">
+        <div class="stat card anim"><b>20+</b><span>测试脚本</span></div>
+        <div class="stat card anim"><b>600+</b><span>断言项</span></div>
+        <div class="stat card anim"><b>3</b><span>平台原生沙箱真机测试</span></div>
+      </div>
+      <div class="grid2" style="align-items: start">
+        <div class="card anim">
+          <h3><span class="ico">🧪</span>内核与能力</h3>
+          <ul class="list">
+            <li>内核：状态 / 记忆 / 工具 / 策略 / 上下文 / 子代理 / 工作流 / 循环（74 项）</li>
+            <li>模型端口：两条协议 + 重试 + 错误归一化（37 项）</li>
+            <li>记忆分块 47 项 · 技能 53 项 · Markdown 65 条</li>
+            <li>子代理 45 项 · 多工作区 43 项 · 飞书通道 73 项</li>
+          </ul>
+        </div>
+        <div class="card anim">
+          <h3><span class="ico">🛡</span>边界与链路</h3>
+          <ul class="list">
+            <li>沙箱：作用区域 / 权限 / 命令扫描 / 环境清洗 / 后端构造 / 审计 / 界面</li>
+            <li>Linux bwrap · macOS Seatbelt · Windows 原生：越权写、断网、进程树真机验证</li>
+            <li>HTTP 29 个端点 62 项 · Trace 29 项 · 启动脚本 45 项 · 环境自检 23 项</li>
+            <li>逃逸测试：用真实的绕过手法给策略后端打分，挡住多少就是多少</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 13. 设计原则 ================= -->
+  <section class="slide">
+    <div class="kicker">设计原则</div>
+    <h2 class="h">几条不肯妥协的规矩<small>宁可失败，也不假装成功</small></h2>
+    <div class="body">
+      <div class="grid2">
+        <div class="card tint anim"><h3><span class="ico">🚫</span>失败关闭</h3><p>沙箱后端不可用就拒绝执行，绝不静默回落到可绕过的策略层；界面、日志、快照里都写清楚现在到底是什么边界。</p></div>
+        <div class="card tint2 anim"><h3><span class="ico">🔍</span>不做空承诺</h3><p>内核断网 / 强制代理 / 合作式代理分级如实标注；bwrap 没有 cgroup 配额，就把「内存/CPU 上限不生效」标出来。</p></div>
+        <div class="card anim"><h3><span class="ico">🧱</span>纵深防御</h3><p>内核沙箱管「碰得到什么」，策略与审批管「要不要做」；两层各自独立，互不背锅。</p></div>
+        <div class="card anim"><h3><span class="ico">🧾</span>一切留痕</h3><p>放行、拒绝、重试、审批、召回都进 trace；会话可恢复、事件可回放，出问题能复盘。</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 14. 结尾 ================= -->
+  <section class="slide cover">
+    <div class="kicker">开始使用</div>
+    <h1 class="title" style="font-size: 64px">零依赖 · 开箱即用<br />可恢复 · 可观测 · 真沙箱</h1>
+    <p class="lede" style="margin-bottom: 10px">
+      控制循环 + 工具生态 + 长期记忆 + 子代理 + 工作流 + 三平台原生沙箱 + 三种 trace 导出 + 自带前端。
+    </p>
+    <div class="code" style="max-width: 720px">run.cmd D:\my-project      <span class="c"># Windows</span>
+./run.sh ~/my-project      <span class="c"># Linux / macOS</span>
+<span class="c"># → http://127.0.0.1:5175</span></div>
+    <div class="hint">← 回看　·　F 全屏　·　Ctrl+P 导出 PDF　·　本页数据来自项目 README 与源码</div>
+  </section>
+
+</div>
+
+<script>
+  const stage = document.getElementById('stage');
+  const slides = [...document.querySelectorAll('.slide')];
+  const pageNow = document.getElementById('pageNow');
+  const bar = document.getElementById('bar');
+  const total = slides.length;
+  document.getElementById('pageTotal').textContent = String(total).padStart(2, '0');
+
+  let idx = 0;
+  {
+    const n = parseInt(String(location.hash).replace(/[^0-9]/g, ''), 10);
+    if (Number.isFinite(n) && n >= 1 && n <= total) idx = n - 1;
+  }
+
+  function render() {
+    slides.forEach((s, k) => s.classList.toggle('active', k === idx));
+    pageNow.textContent = String(idx + 1).padStart(2, '0');
+    bar.style.width = `${total > 1 ? (idx / (total - 1)) * 100 : 100}%`;
+    const want = `#${idx + 1}`;
+    if (location.hash !== want) history.replaceState(null, '', want);
+  }
+
+  function go(n) {
+    const next = Math.max(0, Math.min(total - 1, n));
+    if (next === idx) return;
+    idx = next;
+    render();
+  }
+
+  function fit() {
+    const s = Math.min(window.innerWidth / 1280, window.innerHeight / 720);
+    stage.style.transform = `translate(-50%, -50%) scale(${s})`;
+  }
+
+  window.addEventListener('resize', fit);
+  window.addEventListener('hashchange', () => {
+    const n = parseInt(String(location.hash).replace(/[^0-9]/g, ''), 10);
+    if (Number.isFinite(n)) go(n - 1);
+  });
+
+  window.addEventListener('keydown', (e) => {
+    const k = e.key;
+    if (k === 'ArrowRight' || k === 'ArrowDown' || k === ' ' || k === 'PageDown' || k === 'Enter') { go(idx + 1); e.preventDefault(); }
+    else if (k === 'ArrowLeft' || k === 'ArrowUp' || k === 'PageUp' || k === 'Backspace') { go(idx - 1); e.preventDefault(); }
+    else if (k === 'Home') go(0);
+    else if (k === 'End') go(total - 1);
+    else if (k === 'f' || k === 'F') {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else document.documentElement.requestFullscreen?.();
+    } else if (k === 't' || k === 'T') {
+      document.body.classList.toggle('light');
+    } else if (k === 'g' || k === 'G') {
+      const n = parseInt(prompt(`跳到第几页？（1-${total}）`) || '', 10);
+      if (Number.isFinite(n)) go(n - 1);
+    }
+  });
+
+  document.getElementById('navprev').addEventListener('click', () => go(idx - 1));
+  document.getElementById('navnext').addEventListener('click', () => go(idx + 1));
+
+  let wheelLock = 0;
+  window.addEventListener('wheel', (e) => {
+    const now = Date.now();
+    if (now - wheelLock < 620) return;
+    if (Math.abs(e.deltaY) < 24) return;
+    wheelLock = now;
+    go(idx + (e.deltaY > 0 ? 1 : -1));
+  }, { passive: true });
+
+  let touchX = null;
+  window.addEventListener('touchstart', (e) => { touchX = e.touches[0]?.clientX ?? null; }, { passive: true });
+  window.addEventListener('touchend', (e) => {
+    if (touchX == null) return;
+    const dx = (e.changedTouches[0]?.clientX ?? touchX) - touchX;
+    if (Math.abs(dx) > 48) go(idx + (dx < 0 ? 1 : -1));
+    touchX = null;
+  }, { passive: true });
+
+  fit();
+  render();
+</script>
+</body>
+</html>
