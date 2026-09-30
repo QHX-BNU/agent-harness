@@ -136,6 +136,9 @@ const channel = createFeishuChannel({
 const events = [];
 channel.onEvent((e) => events.push(e));
 
+// 真实事件里没有 sender_name —— 飞书只给 open_id（lark-cli 的 im.message.receive_v1
+// 输出 schema 里没有这个字段）。所以这个替身也不带它：姓名一律走
+// 下面 fakeSpawn 模拟的 im +chat-members-list → identities 缓存，和线上同一条路径。
 const msg = (over = {}) => ({
   type: 'im.message.receive_v1',
   message_id: `om_${Math.random().toString(36).slice(2, 10)}`,
@@ -144,7 +147,6 @@ const msg = (over = {}) => ({
   message_type: 'text',
   sender_type: 'user',
   sender_id: 'ou_alice',
-  sender_name: '爱丽丝',
   content: '@小助手 看一下这个项目',
   mentions: [{ id: 'ou_bot_123', key: '@_user_1', name: '小助手' }],
   create_time: String(Date.now()),
@@ -245,6 +247,55 @@ section('[2b] 免抄 open_id');
   ok('学到之后按 id 判断 @', ch.state.botOpenId === 'ou_real_bot');
   const again = await ch.handleEvent(msg({ chat_id: 'oc_learn', message_id: 'om_learn2', mentions: [{ id: 'ou_real_bot', key: '@_user_1', name: '改了个名' }] }));
   ok('名字变了也能认出来（认 id 了）', again.ok, again.reason || '');
+}
+
+// ================= 2c. 群名的唯一来源 =================
+section('[2c] 群名只有一个来源');
+{
+  // chats get 拿不到群名（比如机器人没开 im:chat:read）时的替身
+  const spawnNoChatName = (cmd, args) => {
+    if (args.includes('chats') && args.includes('get')) {
+      const c = new EventEmitter();
+      c.stdout = new EventEmitter();
+      c.stderr = new EventEmitter();
+      c.kill = () => {};
+      setImmediate(() => c.emit('close', 1));
+      return c;
+    }
+    return fakeSpawn(cmd, args);
+  };
+  const ch = createFeishuChannel({
+    config: testConfig,
+    store,
+    workspaces,
+    tools,
+    memory,
+    agents,
+    workflows,
+    broker,
+    stateFile: path.join(tmp, '.channels', 'feishu-chatname.json'),
+    log: () => {},
+    spawnImpl: spawnNoChatName,
+    providerFactory: provider,
+  });
+
+  // 场景一：查不到群名，但身份缓存里已经有（回填脚本/上一次运行留下的）
+  ch.identities.setChat('oc_cached', '身份缓存里的群名');
+  const r1 = await ch.handleEvent(msg({ chat_id: 'oc_cached', message_id: 'om_cn_1' }));
+  const s1 = store.get(r1.sessionId);
+  const head1 = (s1.messages[0]?.content || '').split('\n')[0];
+  ok('查不到群名时，提示词前缀用身份缓存的群名', head1.includes('身份缓存里的群名'), head1.slice(0, 60));
+  ok('userMeta.chatTitle 同一来源', s1.messages[0]?.sender?.chatTitle === '身份缓存里的群名', String(s1.messages[0]?.sender?.chatTitle));
+  ok('会话标题同一来源', s1.title === '身份缓存里的群名', s1.title);
+
+  // 场景二：两个来源都有但不一样（群改过名）—— 身份缓存必须优先
+  ch.noteChat('oc_renamed', '通道状态里的旧名');
+  ch.identities.setChat('oc_renamed', '身份缓存里的新名');
+  const r2 = await ch.handleEvent(msg({ chat_id: 'oc_renamed', message_id: 'om_cn_2' }));
+  const s2 = store.get(r2.sessionId);
+  const head2 = (s2.messages[0]?.content || '').split('\n')[0];
+  ok('两个来源冲突时以身份缓存为准', head2.includes('身份缓存里的新名') && !head2.includes('旧名'), head2.slice(0, 60));
+  ok('冲突时 userMeta 也不分叉', s2.messages[0]?.sender?.chatTitle === '身份缓存里的新名', String(s2.messages[0]?.sender?.chatTitle));
 }
 
 // ================= 3. 跨群记忆 =================

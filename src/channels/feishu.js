@@ -104,6 +104,16 @@ export function createFeishuChannel({
 
   const sessionKey = (ev) => `${ev.chat_id}:${ev.thread_id || ev.root_id || 'main'}`;
 
+  /**
+   * 群名的唯一解析入口。
+   * 顺序：共享身份缓存（.channels/identities.json，通道 / digest 工具 / 回填脚本共用）
+   *      → 通道自身状态（.channels/feishu.json）
+   *      → null（调用方自己决定退回什么）。
+   * 三个展示位（拼给模型的来源前缀、userMeta.chatTitle、会话标题）必须走同一个顺序，
+   * 否则同一条群消息在提示词、结构化元数据和侧栏标题里会显示成三个不同的群名。
+   */
+  const chatNameOf = (chatId) => identities.chatName(chatId) || (state.chats[chatId] || {}).name || null;
+
   /** 统一的 lark-cli 参数前缀：profile（可选）+ 自定义入口 */
   const cliBase = () => [...(cfg.cliPrefix || []), ...(cfg.profile ? ['--profile', cfg.profile] : [])];
 
@@ -220,11 +230,15 @@ export function createFeishuChannel({
       state.chats[chatId] = { ...(state.chats[chatId] || {}), name, lastAt: Date.now() };
       identities.setChat(chatId, name);
       persist();
-      const sid = state.sessions[`${chatId}:main`] || state.sessions[`${chatId}:${cur.threadKey || 'main'}`];
-      const s = sid ? store.get(sid) : null;
-      if (s && /^飞书群/.test(s.title || '')) {
-        s.title = name;
-        store.save(s);
+      // 这个群下所有会话的标题都回填，不只是 main 话题。
+      // 会话标题就是用户在侧栏看到的群名，只改一个话题会留下「同一个群两个名字」。
+      // 只改还是占位（以「飞书群」开头）的那些，已经定过名的不动。
+      for (const sid of Object.values(state.sessions)) {
+        const s = store.get(sid);
+        if (s?.channel?.chatId === chatId && /^飞书群/.test(s.title || '')) {
+          s.title = name;
+          store.save(s);
+        }
       }
       return name;
     } catch {
@@ -249,8 +263,7 @@ export function createFeishuChannel({
     // 工作区：默认用配置的那个；也支持按 chat_id 指定
     const wsId = (cfg.workspaceByChat || {})[ev.chat_id] || cfg.workspaceId || 'default';
     const ws = workspaces?.get(wsId) || workspaces?.get('default');
-    const chat = state.chats[ev.chat_id] || {};
-    const chatTitle = identities.chatName(ev.chat_id) || chat.name || null;
+    const chatTitle = chatNameOf(ev.chat_id);
     const session = store.create({
       provider: cfg.provider || config.provider,
       model: cfg.model || config.model,
@@ -268,9 +281,10 @@ export function createFeishuChannel({
 
   /** 交给模型看的输入：带上来源，让它可以跨群聚合时区分谁说的 */
   function decoratePrompt(ev, text, session) {
-    const chat = state.chats[ev.chat_id] || {};
-    const who = identities.name(ev.sender_id) || ev.sender_name || ev.sender_id;
-    const where = ev.chat_type === 'p2p' ? '飞书私聊' : `飞书群「${chat.name || String(ev.chat_id).slice(-6)}」`;
+    // 事件里没有姓名：飞书只给 open_id（lark-cli 的 im.message.receive_v1 输出 schema 里
+    // 根本没有 sender_name 字段），所以姓名只能来自身份缓存，取不到就如实退回 id。
+    const who = identities.name(ev.sender_id) || ev.sender_id;
+    const where = ev.chat_type === 'p2p' ? '飞书私聊' : `飞书群「${chatNameOf(ev.chat_id) || String(ev.chat_id).slice(-6)}」`;
     return `[${where} · ${who}(${ev.sender_id})]\n${text}`;
   }
 
@@ -461,10 +475,11 @@ export function createFeishuChannel({
         // 结构化记下「谁在哪个群说的」——跨群查「某人做了什么」全靠它
         userMeta: {
           id: ev.sender_id,
-          name: identities.name(ev.sender_id) || ev.sender_name || null,
+          // 同上：姓名只能来自身份缓存，事件本身不带
+          name: identities.name(ev.sender_id) || null,
           chatId: ev.chat_id,
           chatType: ev.chat_type,
-          chatTitle: identities.chatName(ev.chat_id) || (state.chats[ev.chat_id] || {}).name || null,
+          chatTitle: chatNameOf(ev.chat_id),
           threadKey: ev.thread_id || ev.root_id || 'main',
           messageId: ev.message_id,
         },
@@ -509,7 +524,6 @@ export function createFeishuChannel({
       message_type: 'text',
       sender_type: 'user',
       sender_id: senderId,
-      sender_name: senderName,
       content,
       mentions: mentions || [{ id: cfg.botOpenId || state.botOpenId, key: '@_user_1', name: cfg.botName }],
       create_time: String(Date.now()),
